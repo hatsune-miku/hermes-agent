@@ -2,6 +2,8 @@
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
 
+(Fork of official repo)
+
 # Hermes Agent ☤
 
 <p align="center">
