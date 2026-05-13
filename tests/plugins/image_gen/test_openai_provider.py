@@ -164,6 +164,38 @@ class TestGenerate:
         # gpt-image-2 rejects response_format — we must NOT send it.
         assert "response_format" not in call_kwargs
 
+    def test_base_url_env_passed_to_client(self, provider, monkeypatch):
+        monkeypatch.setenv(
+            "IMAGE_GEN_OPENAI_BASEURL",
+            "  https://openai-proxy.example.com/v1  ",
+        )
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert fake_openai.OpenAI.call_args.kwargs == {
+            "api_key": "test-key",
+            "base_url": "https://openai-proxy.example.com/v1",
+        }
+
+    def test_empty_base_url_env_uses_default_endpoint(self, provider, monkeypatch):
+        monkeypatch.setenv("IMAGE_GEN_OPENAI_BASEURL", "   ")
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_openai = MagicMock()
+        fake_openai.OpenAI.return_value = fake_client
+
+        with patch.dict("sys.modules", {"openai": fake_openai}):
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert fake_openai.OpenAI.call_args.kwargs == {"api_key": "test-key"}
+
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
         ("gpt-image-2-medium", "medium"),

@@ -13,9 +13,13 @@ from gateway.platforms.base import MessageType
 class _Context:
     def __init__(self):
         self.kwargs = None
+        self.tools = []
 
     def register_platform(self, **kwargs):
         self.kwargs = kwargs
+
+    def register_tool(self, **kwargs):
+        self.tools.append(kwargs)
 
 
 def _install_fake_khl(monkeypatch):
@@ -112,6 +116,20 @@ def test_register_exposes_kook_platform_metadata():
     assert ctx.kwargs["allow_all_env"] == "KOOK_ALLOW_ALL_USERS"
     assert ctx.kwargs["max_message_length"] == 2000
     assert 'hermes-agent[kook]' in ctx.kwargs["install_hint"]
+
+
+def test_register_exposes_kook_raw_request_tool():
+    from plugins.platforms.kook import register
+
+    ctx = _Context()
+    register(ctx)
+
+    assert [tool["name"] for tool in ctx.tools] == ["kook_raw_request"]
+    tool = ctx.tools[0]
+    assert tool["toolset"] == "kook"
+    assert callable(tool["handler"])
+    assert callable(tool["check_fn"])
+    assert tool["schema"]["name"] == "kook_raw_request"
 
 
 def test_env_enablement_reads_token_and_home_channel(monkeypatch):

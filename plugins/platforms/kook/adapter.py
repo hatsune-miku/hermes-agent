@@ -387,7 +387,12 @@ def _env_enablement() -> dict | None:
 
 
 def register(ctx) -> None:
-    print("Registering KOOK platform")
+    from plugins.platforms.kook.tools import (
+        KOOK_RAW_REQUEST_SCHEMA,
+        check_kook_raw_request_requirements,
+        handle_kook_raw_request,
+    )
+
     ctx.register_platform(
         name="kook",
         label="KOOK",
@@ -405,8 +410,11 @@ def register(ctx) -> None:
         emoji="🎮",
         pii_safe=False,
         allow_update_command=True,
-        platform_hint=(
-            "You are chatting via KOOK. KOOK supports KMarkdown and media messages. "
-            "Keep responses concise for chat channels."
-        ),
+    ctx.register_tool(
+        name="kook_raw_request",
+        toolset="kook",
+        schema=KOOK_RAW_REQUEST_SCHEMA,
+        handler=handle_kook_raw_request,
+        check_fn=check_kook_raw_request_requirements,
+        emoji="🎮",
     )

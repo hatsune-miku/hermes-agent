@@ -13,6 +13,12 @@ All three hit the same underlying API model (``gpt-image-2``) with a
 different ``quality`` parameter. Output is base64 JSON → saved under
 ``$HERMES_HOME/cache/images/``.
 
+Endpoint resolution:
+
+Set ``IMAGE_GEN_OPENAI_BASEURL`` to route image generation through a custom
+OpenAI-compatible endpoint. When unset, the OpenAI SDK default endpoint is
+used.
+
 Selection precedence (first hit wins):
 
 1. ``OPENAI_IMAGE_MODEL`` env var (escape hatch for scripts / tests)
@@ -48,6 +54,7 @@ logger = logging.getLogger(__name__)
 # ``quality`` is the knob that changes generation time and output fidelity.
 
 API_MODEL = "gpt-image-2"
+BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "gpt-image-2-low": {
@@ -116,6 +123,24 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
+def _resolve_base_url() -> Optional[str]:
+    """Return the configured OpenAI image-gen base URL, if any."""
+    base_url = os.environ.get(BASE_URL_ENV)
+    if not isinstance(base_url, str):
+        return None
+    base_url = base_url.strip()
+    return base_url or None
+
+
+def _build_openai_client(openai_module: Any) -> Any:
+    """Build an OpenAI client, honoring the image-gen-specific base URL."""
+    client_kwargs: Dict[str, Any] = {"api_key": os.environ.get("OPENAI_API_KEY")}
+    base_url = _resolve_base_url()
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    return openai_module.OpenAI(**client_kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
@@ -168,6 +193,9 @@ class OpenAIImageGenProvider(ImageGenProvider):
                     "url": "https://platform.openai.com/api-keys",
                 },
             ],
+            "post_setup_hint": (
+                f"Set {BASE_URL_ENV} to use a custom OpenAI-compatible base URL."
+            ),
         }
 
     def generate(
@@ -223,7 +251,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = openai.OpenAI()
+            client = _build_openai_client(openai)
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
