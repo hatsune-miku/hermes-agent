@@ -38,7 +38,21 @@ def check_kook_raw_request_requirements() -> bool:
     return bool(os.getenv("KOOK_TOKEN", "").strip())
 
 
-def handle_kook_raw_request(method: str, endpoint: str, body: str, **kwargs) -> str:
+# method: str, endpoint: str, body: str,
+def handle_kook_raw_request(**kwargs) -> str:
+    method = kwargs.get("method")
+    endpoint = kwargs.get("endpoint")
+    body = kwargs.get("body")
+
+    if not method:
+        raise ValueError("method is required")
+
+    if not endpoint:
+        raise ValueError("endpoint is required")
+
+    if not body:
+        body = "{}"
+
     try:
         result = asyncio.run(
             _kook_raw_request(method=method, endpoint=endpoint, body=body)
