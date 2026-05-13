@@ -410,6 +410,13 @@ def register(ctx) -> None:
         emoji="🎮",
         pii_safe=False,
         allow_update_command=True,
+        platform_hint=(
+            "You are chatting via KOOK. KOOK supports KMarkdown and media messages. "
+            "Keep responses concise for chat channels. "
+            "Use the kook_raw_request tool to interact with the KOOK OpenAPI directly."
+        ),
+    )
+
     ctx.register_tool(
         name="kook_raw_request",
         toolset="kook",
