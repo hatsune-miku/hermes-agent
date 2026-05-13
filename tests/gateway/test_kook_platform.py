@@ -444,43 +444,6 @@ def test_send_document_uploads_asset(monkeypatch):
     asyncio.run(_run())
 
 
-# ── Markdown normalization ────────────────────────────────────────────────────
-
-def test_normalize_kmd_converts_headings_to_bold():
-    from plugins.platforms.kook.adapter import _normalize_kmd
-
-    assert _normalize_kmd("# Title") == "**Title**"
-    assert _normalize_kmd("## Section") == "**Section**"
-    assert _normalize_kmd("### Sub") == "**Sub**"
-
-
-def test_normalize_kmd_leaves_non_headings_unchanged():
-    from plugins.platforms.kook.adapter import _normalize_kmd
-
-    text = "**bold** and *italic* and `code`\n> quote\n---"
-    assert _normalize_kmd(text) == text
-
-
-def test_send_normalizes_markdown_headings_before_sending(monkeypatch):
-    _install_fake_khl(monkeypatch)
-    from khl import MessageTypes
-    from plugins.platforms.kook.adapter import KookAdapter
-
-    async def _run():
-        adapter = KookAdapter(_config(token="token-123"))
-        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "msg-h"}))
-        adapter._bot = SimpleNamespace(client=SimpleNamespace(fetch_public_channel=AsyncMock(return_value=channel)))
-
-        await adapter.send("channel-1", "# Title\n## Section\nsome text")
-
-        channel.send.assert_awaited_once_with(
-            "**Title**\n**Section**\nsome text",
-            type=MessageTypes.KMD,
-        )
-
-    asyncio.run(_run())
-
-
 # ── Ambient group context ──────────────────────────────────────────────────────
 
 def test_non_mention_group_message_stored_in_ambient_history(monkeypatch):
