@@ -141,7 +141,12 @@ def _build_openai_client(openai_module: Any) -> Any:
     """Build an OpenAI client, honoring the image-gen-specific base URL."""
     api_key = os.environ.get(API_KEY_ENV)
     print("image_gen base url:", api_key)
-    client_kwargs: Dict[str, Any] = {"api_key": api_key}
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "default_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+        },
+    }
     base_url = _resolve_base_url()
     if base_url:
         client_kwargs["base_url"] = base_url
