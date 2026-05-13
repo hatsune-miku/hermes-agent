@@ -37,7 +37,7 @@ def _tmp_hermes_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def provider(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("IMAGE_GEN_OPENAI_API_KEY", "test-key")
     return openai_plugin.OpenAIImageGenProvider()
 
 
@@ -73,11 +73,11 @@ class TestMetadata:
 
 class TestAvailability:
     def test_no_api_key_unavailable(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("IMAGE_GEN_OPENAI_API_KEY", raising=False)
         assert openai_plugin.OpenAIImageGenProvider().is_available() is False
 
     def test_api_key_set_available(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "test")
+        monkeypatch.setenv("IMAGE_GEN_OPENAI_API_KEY", "test")
         assert openai_plugin.OpenAIImageGenProvider().is_available() is True
 
 
@@ -131,7 +131,7 @@ class TestGenerate:
         assert result["error_type"] == "invalid_argument"
 
     def test_missing_api_key(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("IMAGE_GEN_OPENAI_API_KEY", raising=False)
         result = openai_plugin.OpenAIImageGenProvider().generate("a cat")
         assert result["success"] is False
         assert result["error_type"] == "auth_required"

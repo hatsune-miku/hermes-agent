@@ -2114,6 +2114,14 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
     },
+    "IMAGE_GEN_OPENAI_API_KEY": {
+        "description": "OpenAI API key dedicated to the OpenAI image generation plugin",
+        "prompt": "OpenAI image generation API key",
+        "url": "https://platform.openai.com/api-keys",
+        "tools": ["image_generate"],
+        "password": True,
+        "category": "tool",
+    },
     "TINKER_API_KEY": {
         "description": "Tinker API key for RL training",
         "prompt": "Tinker API key",

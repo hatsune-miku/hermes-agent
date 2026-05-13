@@ -19,6 +19,9 @@ Set ``IMAGE_GEN_OPENAI_BASEURL`` to route image generation through a custom
 OpenAI-compatible endpoint. When unset, the OpenAI SDK default endpoint is
 used.
 
+Credentials are read from ``IMAGE_GEN_OPENAI_API_KEY`` so image generation can
+use a dedicated OpenAI-compatible key independent from the chat/model provider.
+
 Selection precedence (first hit wins):
 
 1. ``OPENAI_IMAGE_MODEL`` env var (escape hatch for scripts / tests)
@@ -54,6 +57,7 @@ logger = logging.getLogger(__name__)
 # ``quality`` is the knob that changes generation time and output fidelity.
 
 API_MODEL = "gpt-image-2"
+API_KEY_ENV = "IMAGE_GEN_OPENAI_API_KEY"
 BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
 
 _MODELS: Dict[str, Dict[str, Any]] = {
@@ -135,7 +139,7 @@ def _resolve_base_url() -> Optional[str]:
 
 def _build_openai_client(openai_module: Any) -> Any:
     """Build an OpenAI client, honoring the image-gen-specific base URL."""
-    client_kwargs: Dict[str, Any] = {"api_key": os.environ.get("OPENAI_API_KEY")}
+    client_kwargs: Dict[str, Any] = {"api_key": os.environ.get(API_KEY_ENV)}
     base_url = _resolve_base_url()
     if base_url:
         client_kwargs["base_url"] = base_url
@@ -159,7 +163,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
         return "OpenAI"
 
     def is_available(self) -> bool:
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not os.environ.get(API_KEY_ENV):
             return False
         try:
             import openai  # noqa: F401
@@ -189,8 +193,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
             "tag": "gpt-image-2 at low/medium/high quality tiers",
             "env_vars": [
                 {
-                    "key": "OPENAI_API_KEY",
-                    "prompt": "OpenAI API key",
+                    "key": API_KEY_ENV,
+                    "prompt": "OpenAI image generation API key",
                     "url": "https://platform.openai.com/api-keys",
                 },
             ],
@@ -216,10 +220,10 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not os.environ.get(API_KEY_ENV):
             return error_response(
                 error=(
-                    "OPENAI_API_KEY not set. Run `hermes tools` → Image "
+                    f"{API_KEY_ENV} not set. Run `hermes tools` → Image "
                     "Generation → OpenAI to configure, or `hermes setup` "
                     "to add the key."
                 ),
