@@ -39,10 +39,11 @@ def check_kook_raw_request_requirements() -> bool:
 
 
 # method: str, endpoint: str, body: str,
-def handle_kook_raw_request(**kwargs) -> str:
-    method = kwargs.get("method")
-    endpoint = kwargs.get("endpoint")
-    body = kwargs.get("body")
+def handle_kook_raw_request(body, **kwargs) -> str:
+    print("kook raw request", body)
+    method = body["method"]
+    endpoint = body["endpoint"]
+    body = body["body"]
 
     if not method:
         raise ValueError("method is required")
