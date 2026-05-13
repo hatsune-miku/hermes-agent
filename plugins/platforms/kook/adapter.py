@@ -108,6 +108,32 @@ class KookAdapter(BasePlatformAdapter):
             logger.warning("KOOK: failed to send message to %s: %s", chat_id, exc)
             return SendResult(success=False, error=str(exc))
 
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        if not self._bot:
+            return SendResult(success=False, error="KOOK bot is not connected")
+        try:
+            from khl import api
+
+            request = (
+                api.DirectMessage.update(msg_id=message_id, content=content)
+                if chat_id in self._dm_chat_ids
+                else api.Message.update(msg_id=message_id, content=content)
+            )
+            await self._bot.client.gate.exec_req(request)
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            error = str(exc)
+            retryable = _is_retryable_kook_edit_error(error)
+            logger.warning("KOOK: failed to edit message %s: %s", message_id, exc)
+            return SendResult(success=False, message_id=message_id, error=error, retryable=retryable)
+
     async def send_image(
         self,
         chat_id: str,
@@ -323,6 +349,11 @@ def _display_name(author: Any) -> str:
         or getattr(author, "id", None)
         or ""
     )
+
+
+def _is_retryable_kook_edit_error(error: str) -> bool:
+    lower = error.lower()
+    return "flood" in lower or "rate" in lower or "429" in lower or "too many" in lower
 
 
 def check_kook_requirements() -> bool:

@@ -31,6 +31,16 @@ def _install_fake_khl(monkeypatch):
         GROUP = "GROUP"
         PERSON = "PERSON"
 
+    class _MessageAPI:
+        @staticmethod
+        def update(**kwargs):
+            return ("message.update", kwargs)
+
+    class _DirectMessageAPI:
+        @staticmethod
+        def update(**kwargs):
+            return ("direct-message.update", kwargs)
+
     class Bot:
         def __init__(self, token=""):
             self.token = token
@@ -39,6 +49,7 @@ def _install_fake_khl(monkeypatch):
                 fetch_public_channel=AsyncMock(),
                 fetch_user=AsyncMock(),
                 create_asset=AsyncMock(),
+                gate=SimpleNamespace(exec_req=AsyncMock(return_value={})),
             )
             self._message_handler = None
 
@@ -72,6 +83,7 @@ def _install_fake_khl(monkeypatch):
     class Message(RawMessage):
         pass
 
+    fake.api = SimpleNamespace(Message=_MessageAPI, DirectMessage=_DirectMessageAPI)
     fake.RawMessage = RawMessage
     fake.Message = Message
     fake.Bot = Bot
@@ -559,5 +571,64 @@ def test_ambient_history_capped_at_max_size(monkeypatch):
             await adapter._on_kook_message(msg)
 
         assert len(adapter._group_history["channel-1"]) <= 20
+
+    asyncio.run(_run())
+
+
+def test_edit_message_updates_channel_message(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        gate = SimpleNamespace(exec_req=AsyncMock(return_value={}))
+        adapter._bot = SimpleNamespace(client=SimpleNamespace(gate=gate))
+
+        result = await adapter.edit_message("channel-1", "msg-1", "updated")
+
+        assert result.success is True
+        assert result.message_id == "msg-1"
+        gate.exec_req.assert_awaited_once_with(
+            ("message.update", {"msg_id": "msg-1", "content": "updated"})
+        )
+
+    asyncio.run(_run())
+
+
+def test_edit_message_uses_dm_api_for_cached_dm_chat(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        adapter._dm_chat_ids.add("user-2")
+        gate = SimpleNamespace(exec_req=AsyncMock(return_value={}))
+        adapter._bot = SimpleNamespace(client=SimpleNamespace(gate=gate))
+
+        result = await adapter.edit_message("user-2", "dm-msg-1", "updated dm")
+
+        assert result.success is True
+        assert result.message_id == "dm-msg-1"
+        gate.exec_req.assert_awaited_once_with(
+            ("direct-message.update", {"msg_id": "dm-msg-1", "content": "updated dm"})
+        )
+
+    asyncio.run(_run())
+
+
+def test_edit_message_marks_rate_limit_errors_retryable(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        gate = SimpleNamespace(exec_req=AsyncMock(side_effect=Exception("429 rate limited")))
+        adapter._bot = SimpleNamespace(client=SimpleNamespace(gate=gate))
+
+        result = await adapter.edit_message("channel-1", "msg-1", "updated")
+
+        assert result.success is False
+        assert result.retryable is True
+        assert "429" in result.error
 
     asyncio.run(_run())
