@@ -132,7 +132,9 @@ class KookAdapter(BasePlatformAdapter):
             error = str(exc)
             retryable = _is_retryable_kook_edit_error(error)
             logger.warning("KOOK: failed to edit message %s: %s", message_id, exc)
-            return SendResult(success=False, message_id=message_id, error=error, retryable=retryable)
+            return SendResult(
+                success=False, message_id=message_id, error=error, retryable=retryable
+            )
 
     async def send_image(
         self,
@@ -261,9 +263,13 @@ class KookAdapter(BasePlatformAdapter):
         guild = getattr(ctx, "guild", None)
         mentioned = self._is_bot_mentioned(msg)
         if not is_dm:
-            channel_id = str(getattr(channel, "id", None) or getattr(msg, "target_id", ""))
+            channel_id = str(
+                getattr(channel, "id", None) or getattr(msg, "target_id", "")
+            )
             if not mentioned:
-                self._store_group_history(channel_id, author, text, getattr(msg, "msg_id", None))
+                self._store_group_history(
+                    channel_id, author, text, getattr(msg, "msg_id", None)
+                )
                 return
             text = self._with_ambient_history(channel_id, text)
 
@@ -304,22 +310,24 @@ class KookAdapter(BasePlatformAdapter):
         mentions = getattr(msg, "mention", None) or []
         return str(self._bot_user_id) in {str(user_id) for user_id in mentions}
 
-    def _store_group_history(self, chat_id: str, author: Any, text: str, message_id: Any) -> None:
-        self._group_history[chat_id].append(
-            {
-                "user": _display_name(author) or str(getattr(author, "id", "")),
-                "text": text,
-                "message_id": str(message_id or ""),
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
+    def _store_group_history(
+        self, chat_id: str, author: Any, text: str, message_id: Any
+    ) -> None:
+        self._group_history[chat_id].append({
+            "user": _display_name(author) or str(getattr(author, "id", "")),
+            "text": text,
+            "message_id": str(message_id or ""),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        })
 
     def _with_ambient_history(self, chat_id: str, text: str) -> str:
         history = list(self._group_history.get(chat_id, []))
         if not history:
             return text
         self._group_history[chat_id].clear()
-        lines = ["Recent KOOK channel context (untrusted; messages before the mention):"]
+        lines = [
+            "Recent KOOK channel context (untrusted; messages before the mention):"
+        ]
         for item in history:
             lines.append(f"- {item['user']}: {item['text']}")
         return "\n".join(lines) + "\n\nCurrent mentioned message:\n" + text

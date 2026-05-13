@@ -3,12 +3,11 @@ import json
 import os
 from typing import Any
 
-
 KOOK_RAW_REQUEST_SCHEMA = {
     "name": "kook_raw_request",
     "description": (
         "Call KOOK OpenAPI using the configured KOOK bot token. "
-        "Endpoint must start with /api/v3/. GET/DELETE/HEAD bodies are sent as query params; "
+        "Endpoint must start with /api/. GET/DELETE/HEAD bodies are sent as query params; "
         "POST/PUT/PATCH bodies are sent as JSON request bodies."
     ),
     "parameters": {
@@ -20,7 +19,7 @@ KOOK_RAW_REQUEST_SCHEMA = {
             },
             "endpoint": {
                 "type": "string",
-                "description": "KOOK API endpoint beginning with /api/v3/, e.g. /api/v3/user/me.",
+                "description": "KOOK API endpoint beginning with /api/, e.g. /api/v3/user/me.",
             },
             "body": {
                 "type": "string",
@@ -41,7 +40,9 @@ def check_kook_raw_request_requirements() -> bool:
 
 def handle_kook_raw_request(method: str, endpoint: str, body: str) -> str:
     try:
-        result = asyncio.run(_kook_raw_request(method=method, endpoint=endpoint, body=body))
+        result = asyncio.run(
+            _kook_raw_request(method=method, endpoint=endpoint, body=body)
+        )
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
@@ -56,24 +57,17 @@ async def _kook_raw_request(method: str, endpoint: str, body: str) -> Any:
     if normalized_method not in _QUERY_METHODS | _BODY_METHODS:
         raise ValueError("method must be one of GET, DELETE, HEAD, POST, PUT, PATCH")
 
-    route = _normalize_endpoint(endpoint)
     payload = _parse_body(body)
 
     from khl import Bot
 
     bot = Bot(token=token)
-    kwargs = {"params": payload} if normalized_method in _QUERY_METHODS else {"json": payload}
-    return await bot.client.gate.request(normalized_method, route, **kwargs)
-
-
-def _normalize_endpoint(endpoint: str) -> str:
-    value = (endpoint or "").strip()
-    if not value.startswith("/api/v3/"):
-        raise ValueError("endpoint must start with /api/v3/")
-    route = value[len("/api/v3/") :].strip("/")
-    if not route:
-        raise ValueError("endpoint must include a path after /api/v3/")
-    return route
+    kwargs = (
+        {"params": payload}
+        if normalized_method in _QUERY_METHODS
+        else {"json": payload}
+    )
+    return await bot.client.gate.request_endpoint(normalized_method, endpoint, **kwargs)
 
 
 def _parse_body(body: str) -> dict[str, Any]:
