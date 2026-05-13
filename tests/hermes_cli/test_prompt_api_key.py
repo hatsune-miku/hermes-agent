@@ -28,12 +28,17 @@ def _pconfig(name="deepseek"):
 
 
 def _run_prompt(existing_key, choice, new_key="", provider_id="", pconfig_name="deepseek"):
-    """Invoke _prompt_api_key with mocked input()/getpass() responses."""
+    """Invoke _prompt_api_key with mocked visible input responses."""
     from hermes_cli import main as m
 
     pconfig = _pconfig(pconfig_name)
-    with patch("builtins.input", return_value=choice), \
-         patch("getpass.getpass", return_value=new_key):
+    if not existing_key:
+        answers = iter([new_key])
+    elif choice == "r":
+        answers = iter([choice, new_key])
+    else:
+        answers = iter([choice])
+    with patch("builtins.input", side_effect=lambda _prompt="": next(answers)):
         return m._prompt_api_key(pconfig, existing_key, provider_id=provider_id)
 
 

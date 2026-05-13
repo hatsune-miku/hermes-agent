@@ -1,0 +1,27 @@
+name: kook-platform
+label: KOOK
+kind: platform
+version: 1.0.0
+description: >
+  KOOK gateway adapter for Hermes Agent.
+  Connects through khl.py and relays KOOK channel or private messages
+  between KOOK and the Hermes agent.
+author: Nous Research
+requires_env:
+  - name: KOOK_TOKEN
+    description: "KOOK bot token"
+    prompt: "KOOK bot token"
+    password: true
+optional_env:
+  - name: KOOK_HOME_CHANNEL
+    description: "KOOK channel ID for cron / notification delivery"
+    prompt: "Home channel ID (optional)"
+    password: false
+  - name: KOOK_ALLOWED_USERS
+    description: "Comma-separated KOOK user IDs allowed to talk to the bot"
+    prompt: "Allowed KOOK user IDs (comma-separated)"
+    password: false
+  - name: KOOK_ALLOW_ALL_USERS
+    description: "Allow anyone to talk to the KOOK bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false

@@ -310,9 +310,9 @@ class TestPostSetup:
         selections = iter([1, 0])  # local_embedded, openai
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
-        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        input_answers = iter(["", "sk-local-test"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(input_answers, ""))
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-local-test")
         saved_configs = []
         monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved_configs.append(cfg.copy()))
 
@@ -344,9 +344,9 @@ class TestPostSetup:
         selections = iter([1, 0])  # local_embedded, openai
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
         monkeypatch.setattr("shutil.which", lambda name: None)
-        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        input_answers = iter(["", "sk-local-test"])
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(input_answers, ""))
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-local-test")
         monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
 
         provider = HindsightMemoryProvider()
@@ -369,7 +369,6 @@ class TestPostSetup:
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
         monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
 
         env_path = hermes_home / ".env"
@@ -414,7 +413,6 @@ class TestPostSetup:
         monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
         monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
 
         provider = HindsightMemoryProvider()

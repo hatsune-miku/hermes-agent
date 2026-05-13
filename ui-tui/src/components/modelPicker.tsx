@@ -290,8 +290,6 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
 
   // ── Key entry stage ──────────────────────────────────────────────────
   if (stage === 'key' && provider) {
-    const masked = keyInput ? '•'.repeat(Math.min(keyInput.length, 40)) : ''
-
     return (
       <Box flexDirection="column" width={width}>
         <Text bold color={t.color.accent} wrap="truncate-end">
@@ -309,7 +307,7 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
         </Text>
 
         <Text color={t.color.accent} wrap="truncate-end">
-          {'  '}{masked || '(empty)'}{keySaving ? '' : '▎'}
+          {'  '}{keyInput || '(empty)'}{keySaving ? '' : '▎'}
         </Text>
 
         <Text color={t.color.muted} wrap="truncate-end"> </Text>
