@@ -133,16 +133,20 @@ def _resolve_base_url() -> Optional[str]:
     if not isinstance(base_url, str):
         return None
     base_url = base_url.strip()
-    print("image_gen base url: ", base_url)
+    print("image_gen base url:", base_url)
     return base_url or None
 
 
 def _build_openai_client(openai_module: Any) -> Any:
     """Build an OpenAI client, honoring the image-gen-specific base URL."""
-    client_kwargs: Dict[str, Any] = {"api_key": os.environ.get(API_KEY_ENV)}
+    api_key = os.environ.get(API_KEY_ENV)
+    print("image_gen base url:", api_key)
+    client_kwargs: Dict[str, Any] = {"api_key": api_key}
     base_url = _resolve_base_url()
     if base_url:
         client_kwargs["base_url"] = base_url
+
+    print("full args passed to openai:", client_kwargs)
     return openai_module.OpenAI(**client_kwargs)
 
 
@@ -257,6 +261,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
 
         try:
             client = _build_openai_client(openai)
+
+            print("creating image with payload:", payload)
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
