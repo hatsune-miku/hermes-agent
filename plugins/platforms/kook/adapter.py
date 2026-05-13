@@ -397,8 +397,11 @@ def _env_enablement() -> dict | None:
 def register(ctx) -> None:
     from plugins.platforms.kook.tools import (
         KOOK_RAW_REQUEST_SCHEMA,
+        SEND_FILE_BEHIND_LINK_SCHEMA,
         check_kook_raw_request_requirements,
+        check_send_file_behind_link_requirements,
         handle_kook_raw_request,
+        handle_send_file_behind_link,
     )
 
     ctx.register_platform(
@@ -432,4 +435,13 @@ def register(ctx) -> None:
         handler=handle_kook_raw_request,
         check_fn=check_kook_raw_request_requirements,
         emoji="🎮",
+    )
+
+    ctx.register_tool(
+        name="send_file_behind_link",
+        toolset="kook",
+        schema=SEND_FILE_BEHIND_LINK_SCHEMA,
+        handler=handle_send_file_behind_link,
+        check_fn=check_send_file_behind_link_requirements,
+        emoji="📎",
     )

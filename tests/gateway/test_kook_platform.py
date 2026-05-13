@@ -124,12 +124,16 @@ def test_register_exposes_kook_raw_request_tool():
     ctx = _Context()
     register(ctx)
 
-    assert [tool["name"] for tool in ctx.tools] == ["kook_raw_request"]
-    tool = ctx.tools[0]
-    assert tool["toolset"] == "kook"
-    assert callable(tool["handler"])
-    assert callable(tool["check_fn"])
-    assert tool["schema"]["name"] == "kook_raw_request"
+    tool_names = [tool["name"] for tool in ctx.tools]
+    assert "kook_raw_request" in tool_names
+    assert "send_file_behind_link" in tool_names
+    raw = next(t for t in ctx.tools if t["name"] == "kook_raw_request")
+    send_file = next(t for t in ctx.tools if t["name"] == "send_file_behind_link")
+    assert raw["toolset"] == "kook"
+    assert send_file["toolset"] == "kook"
+    assert callable(send_file["handler"])
+    assert callable(send_file["check_fn"])
+    assert send_file["schema"]["name"] == "send_file_behind_link"
 
 
 def test_env_enablement_reads_token_and_home_channel(monkeypatch):
