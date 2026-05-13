@@ -442,3 +442,159 @@ def test_send_document_uploads_asset(monkeypatch):
         channel.send.assert_any_await("report", type=MessageTypes.KMD)
 
     asyncio.run(_run())
+
+
+# ── Markdown normalization ────────────────────────────────────────────────────
+
+def test_normalize_kmd_converts_headings_to_bold():
+    from plugins.platforms.kook.adapter import _normalize_kmd
+
+    assert _normalize_kmd("# Title") == "**Title**"
+    assert _normalize_kmd("## Section") == "**Section**"
+    assert _normalize_kmd("### Sub") == "**Sub**"
+
+
+def test_normalize_kmd_leaves_non_headings_unchanged():
+    from plugins.platforms.kook.adapter import _normalize_kmd
+
+    text = "**bold** and *italic* and `code`\n> quote\n---"
+    assert _normalize_kmd(text) == text
+
+
+def test_send_normalizes_markdown_headings_before_sending(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import MessageTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "msg-h"}))
+        adapter._bot = SimpleNamespace(client=SimpleNamespace(fetch_public_channel=AsyncMock(return_value=channel)))
+
+        await adapter.send("channel-1", "# Title\n## Section\nsome text")
+
+        channel.send.assert_awaited_once_with(
+            "**Title**\n**Section**\nsome text",
+            type=MessageTypes.KMD,
+        )
+
+    asyncio.run(_run())
+
+
+# ── Ambient group context ──────────────────────────────────────────────────────
+
+def test_non_mention_group_message_stored_in_ambient_history(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import ChannelPrivacyTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        adapter._bot_user_id = "bot-1"
+        captured = []
+
+        async def capture(event):
+            captured.append(event)
+
+        adapter.handle_message = capture
+        msg = SimpleNamespace(
+            content="just chatting",
+            mention=[],
+            channel_type=ChannelPrivacyTypes.GROUP,
+            msg_id="ambient-1",
+            target_id="channel-1",
+            author_id="user-1",
+            author=SimpleNamespace(id="user-1", username="alice", nickname="Alice", bot=False),
+            ctx=SimpleNamespace(channel=SimpleNamespace(id="channel-1", name="general"), guild=None),
+        )
+        await adapter._on_kook_message(msg)
+
+        assert captured == []
+        assert "channel-1" in adapter._group_history
+        entries = list(adapter._group_history["channel-1"])
+        assert len(entries) == 1
+        assert entries[0]["user"] == "Alice"
+        assert entries[0]["text"] == "just chatting"
+
+    asyncio.run(_run())
+
+
+def test_mention_message_prepends_ambient_history_then_clears(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import ChannelPrivacyTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        adapter._bot_user_id = "bot-1"
+        captured = []
+
+        async def capture(event):
+            captured.append(event)
+
+        adapter.handle_message = capture
+
+        for i in range(2):
+            ambient = SimpleNamespace(
+                content=f"ambient message {i}",
+                mention=[],
+                channel_type=ChannelPrivacyTypes.GROUP,
+                msg_id=f"ambient-{i}",
+                target_id="channel-1",
+                author_id="user-1",
+                author=SimpleNamespace(id="user-1", username="alice", nickname="Alice", bot=False),
+                ctx=SimpleNamespace(channel=SimpleNamespace(id="channel-1", name="general"), guild=None),
+            )
+            await adapter._on_kook_message(ambient)
+
+        mention_msg = SimpleNamespace(
+            content="hey bot, summarise",
+            mention=["bot-1"],
+            channel_type=ChannelPrivacyTypes.GROUP,
+            msg_id="mention-1",
+            target_id="channel-1",
+            author_id="user-2",
+            author=SimpleNamespace(id="user-2", username="bob", nickname="Bob", bot=False),
+            ctx=SimpleNamespace(
+                channel=SimpleNamespace(id="channel-1", name="general"),
+                guild=SimpleNamespace(id="guild-1"),
+            ),
+        )
+        await adapter._on_kook_message(mention_msg)
+
+        assert len(captured) == 1
+        event_text = captured[0].text
+        assert "ambient message 0" in event_text
+        assert "ambient message 1" in event_text
+        assert "hey bot, summarise" in event_text
+        assert len(adapter._group_history.get("channel-1", [])) == 0
+
+    asyncio.run(_run())
+
+
+def test_ambient_history_capped_at_max_size(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import ChannelPrivacyTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        adapter._bot_user_id = "bot-1"
+        adapter.handle_message = AsyncMock()
+
+        for i in range(30):
+            msg = SimpleNamespace(
+                content=f"msg {i}",
+                mention=[],
+                channel_type=ChannelPrivacyTypes.GROUP,
+                msg_id=f"m-{i}",
+                target_id="channel-1",
+                author_id="user-1",
+                author=SimpleNamespace(id="user-1", username="alice", nickname=None, bot=False),
+                ctx=SimpleNamespace(channel=SimpleNamespace(id="channel-1", name="general"), guild=None),
+            )
+            await adapter._on_kook_message(msg)
+
+        assert len(adapter._group_history["channel-1"]) <= 20
+
+    asyncio.run(_run())
