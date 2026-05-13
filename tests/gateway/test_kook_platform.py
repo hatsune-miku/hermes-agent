@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import types
 from pathlib import Path
@@ -43,6 +44,18 @@ def _install_fake_khl(monkeypatch):
 
         def on_message(self, *args, **kwargs):
             def decorator(func):
+                # Replicate khl.py client.register validation:
+                # handler must have exactly one param with a RawMessage subclass annotation
+                params = list(inspect.signature(func).parameters.values())
+                if len(params) != 1 or not (
+                    params[0].annotation is not inspect.Parameter.empty
+                    and isinstance(params[0].annotation, type)
+                    and issubclass(params[0].annotation, fake.RawMessage)
+                ):
+                    raise TypeError(
+                        "handler must have one and only one param, "
+                        "and the param inherits RawMessage"
+                    )
                 self._message_handler = func
                 return func
             return decorator
@@ -53,6 +66,14 @@ def _install_fake_khl(monkeypatch):
         async def close(self):
             return None
 
+    class RawMessage:
+        pass
+
+    class Message(RawMessage):
+        pass
+
+    fake.RawMessage = RawMessage
+    fake.Message = Message
     fake.Bot = Bot
     fake.MessageTypes = MessageTypes
     fake.ChannelPrivacyTypes = ChannelPrivacyTypes
