@@ -129,6 +129,7 @@ def _resolve_base_url() -> Optional[str]:
     if not isinstance(base_url, str):
         return None
     base_url = base_url.strip()
+    print("image_gen base url: ", base_url)
     return base_url or None
 
 
