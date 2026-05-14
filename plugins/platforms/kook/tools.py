@@ -209,8 +209,20 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
         target = await bot.client.fetch_public_channel(chat_id)
 
     print("asset_url=", asset_url)
+    is_image = name.lower().endswith((
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".jfif",
+        ".webp",
+    ))
+    print("is_image=", is_image)
 
-    ret = await target.send(asset_url, type=MessageTypes.FILE)
+    if is_image:
+        ret = await target.send(asset_url, type=MessageTypes.IMAGE)
+    else:
+        ret = await target.send(asset_url, type=MessageTypes.FILE)
     print("send_file_behind_link", "ret=", ret)
     return ret
 
