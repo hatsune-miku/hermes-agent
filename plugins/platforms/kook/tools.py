@@ -220,7 +220,7 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
     print("is_image=", is_image)
 
     if is_image:
-        ret = await target.send(asset_url, type=MessageTypes.IMAGE)
+        ret = await target.send(asset_url, type=MessageTypes.IMG)
     else:
         ret = await target.send(asset_url, type=MessageTypes.FILE)
     print("send_file_behind_link", "ret=", ret)
