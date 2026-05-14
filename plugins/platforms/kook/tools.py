@@ -106,14 +106,14 @@ SEND_FILE_BEHIND_LINK_SCHEMA = {
     "name": "send_file_behind_link",
     "description": (
         "When you need to send a file or image but you only have a direct URL, "
-        "you MUST use this tool to deliver it. The tool downloads the URL, "
+        "you MUST use this tool to deliver it. The tool automatically downloads the URL, "
         "renames it to ``file_name``, and sends it as a KOOK file attachment "
-        "to the current chat."
+        "to the current chat, in the correct way."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "file_path": {
+            "url": {
                 "type": "string",
                 "description": "Direct HTTP(S) URL of the file to download and send.",
             },
@@ -122,16 +122,18 @@ SEND_FILE_BEHIND_LINK_SCHEMA = {
                 "description": "Filename shown to the recipient. Include the extension.",
             },
         },
-        "required": ["file_path", "file_name"],
+        "required": ["url", "file_name"],
     },
 }
 
 
 def handle_send_file_behind_link(body, **kwargs) -> str:
     try:
-        file_path = body.get("file_path") if isinstance(body, dict) else ""
+        url = body.get("url") if isinstance(body, dict) else ""
         file_name = body.get("file_name") if isinstance(body, dict) else ""
-        result = asyncio.run(_send_file_behind_link(file_path=file_path or "", file_name=file_name or ""))
+        result = asyncio.run(
+            _send_file_behind_link(url=url or "", file_name=file_name or "")
+        )
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         logger.warning("send_file_behind_link failed: %s", exc)
@@ -153,14 +155,14 @@ def _download_to_path(url: str, dest: Path) -> None:
                     fp.write(chunk)
 
 
-async def _send_file_behind_link(file_path: str, file_name: str) -> Any:
+async def _send_file_behind_link(url: str, file_name: str) -> Any:
     token = os.getenv("KOOK_TOKEN", "").strip()
     if not token:
         raise ValueError("KOOK_TOKEN is not configured")
 
-    url = (file_path or "").strip()
+    url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
-        raise ValueError("file_path must be an http:// or https:// URL")
+        raise ValueError("url must be an http:// or https:// URL")
 
     name = (file_name or "").strip()
     if not name:
@@ -172,7 +174,9 @@ async def _send_file_behind_link(file_path: str, file_name: str) -> Any:
 
     chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
     if not chat_id:
-        raise ValueError("no active chat context; cannot determine where to send the file")
+        raise ValueError(
+            "no active chat context; cannot determine where to send the file"
+        )
     user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip()
     is_dm = bool(user_id) and user_id == chat_id
 
@@ -187,7 +191,19 @@ async def _send_file_behind_link(file_path: str, file_name: str) -> Any:
         target = await bot.client.fetch_user(chat_id)
     else:
         target = await bot.client.fetch_public_channel(chat_id)
-    return await target.send(asset_url, type=MessageTypes.FILE)
+
+    is_image = name.lower().endswith((
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".jfif",
+        ".webp",
+    ))
+    if is_image:
+        return await target.send(asset_url, MessageTypes.IMAGE)
+    else:
+        return await target.send(asset_url, MessageTypes.FILE)
 
 
 def check_send_file_behind_link_requirements() -> bool:
