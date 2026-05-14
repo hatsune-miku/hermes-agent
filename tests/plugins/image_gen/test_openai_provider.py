@@ -235,13 +235,24 @@ class TestGenerate:
             "image_url": "https://example.com/cat.png",
         }
 
-    def test_custom_base_url_image_inputs_use_images_generate(self, provider, monkeypatch):
+    def test_custom_base_url_image_inputs_use_chat_completions(self, provider, monkeypatch):
         monkeypatch.setenv(
             "IMAGE_GEN_OPENAI_BASEURL",
             "https://openai-proxy.example.com/v1",
         )
         fake_client = MagicMock()
-        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+        fake_client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="https://example.com/out.png")
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            openai_plugin,
+            "_data_url_for_remote_image",
+            lambda url: "data:image/png;base64,cmVm",
+        )
 
         with _patched_openai(fake_client):
             result = provider.generate(
@@ -254,13 +265,23 @@ class TestGenerate:
         assert result["action"] == "edit"
         assert result["input_image_count"] == 1
         fake_client.responses.create.assert_not_called()
+        fake_client.images.generate.assert_not_called()
 
-        call_kwargs = fake_client.images.generate.call_args.kwargs
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
         assert call_kwargs["model"] == openai_plugin.API_MODEL
-        assert call_kwargs["extra_body"] == {
-            "image_urls": ["https://example.com/cat.png"],
-            "action": "edit",
-        }
+        assert call_kwargs["stream"] is False
+        assert call_kwargs["messages"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "make it cinematic"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,cmVm"},
+                    },
+                ],
+            }
+        ]
 
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),

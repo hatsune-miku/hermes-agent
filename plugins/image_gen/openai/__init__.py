@@ -23,9 +23,9 @@ Credentials are read from ``IMAGE_GEN_OPENAI_API_KEY`` so image generation can
 use a dedicated OpenAI-compatible key independent from the chat/model provider.
 For image-conditioned requests, ``IMAGE_GEN_OPENAI_RESPONSES_MODEL`` can
 override the Responses API host model. When a custom base URL is configured,
-image-conditioned requests use ``/images/generations`` instead and pass
-reference images through the request body for OpenAI-compatible gateways that
-do not implement the Responses API.
+image-conditioned requests use multimodal ``/chat/completions`` because some
+OpenAI-compatible gateways expose image editing through chat messages instead
+of the Responses API.
 
 Selection precedence (first hit wins):
 
@@ -38,9 +38,11 @@ Selection precedence (first hit wins):
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -65,13 +67,17 @@ logger = logging.getLogger(__name__)
 # ``quality`` setting. ``api_model`` is what gets sent to OpenAI;
 # ``quality`` is the knob that changes generation time and output fidelity.
 
-API_MODEL = "gpt-image-2-vip"
+API_MODEL = "gpt-image-2"
 API_KEY_ENV = "IMAGE_GEN_OPENAI_API_KEY"
 BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
 RESPONSES_MODEL_ENV = "IMAGE_GEN_OPENAI_RESPONSES_MODEL"
 RESPONSES_MODEL = "gpt-5.5"
 MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
 VALID_IMAGE_ACTIONS = {"auto", "generate", "edit"}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+)
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "gpt-image-2-low": {
@@ -101,6 +107,12 @@ _SIZES = {
     "square": "1024x1024",
     "portrait": "1024x1536",
 }
+
+_DATA_URL_RE = re.compile(
+    r"data:image/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)"
+)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_URL_RE = re.compile(r"https?://[^\s)\"']+")
 
 
 def _load_openai_config() -> Dict[str, Any]:
@@ -162,9 +174,7 @@ def _build_openai_client(openai_module: Any, base_url: Optional[str] = None) -> 
     api_key = os.environ.get(API_KEY_ENV)
     client_kwargs: Dict[str, Any] = {
         "api_key": api_key,
-        "default_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-        },
+        "default_headers": {"User-Agent": USER_AGENT},
     }
     if base_url is None:
         base_url = _resolve_base_url()
@@ -208,6 +218,32 @@ def _data_url_for_image_path(raw_path: str) -> str:
 
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _data_url_for_remote_image(image_url: str) -> str:
+    """Download a remote image URL and return a data URL for chat-completions."""
+    import requests
+
+    response = requests.get(
+        image_url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=30,
+    )
+    response.raise_for_status()
+    image_bytes = response.content
+
+    if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+        limit_mb = MAX_INPUT_IMAGE_BYTES // (1024 * 1024)
+        raise ValueError(f"Input image is too large: {image_url} exceeds {limit_mb}MB")
+
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    if not content_type.startswith("image/"):
+        content_type = mimetypes.guess_type(urlparse(image_url).path)[0] or ""
+    if not content_type.startswith("image/"):
+        raise ValueError(f"Remote URL did not return an image: {image_url}")
+
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
 
 
 def _validate_image_url(value: str) -> str:
@@ -260,32 +296,169 @@ def _input_image_count(content: List[Dict[str, Any]]) -> int:
     return sum(1 for item in content if item.get("type") == "input_image")
 
 
-def _build_image_generation_extra_body(
+def _build_chat_completion_messages(
     input_content: List[Dict[str, Any]],
     *,
-    action: str,
-) -> Dict[str, Any]:
-    """Build extra request body fields for custom ``images.generate`` gateways."""
-    image_urls: List[str] = []
-    file_ids: List[str] = []
+    inline_remote_images: bool = False,
+) -> List[Dict[str, Any]]:
+    """Build the multimodal Chat Completions body used by custom gateways."""
+    content: List[Dict[str, Any]] = []
     for item in input_content:
-        if item.get("type") != "input_image":
+        item_type = item.get("type")
+        if item_type == "input_text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                content.append({"type": "text", "text": text})
             continue
+
+        if item_type != "input_image":
+            continue
+
         image_url = item.get("image_url")
         if isinstance(image_url, str) and image_url:
-            image_urls.append(image_url)
+            if inline_remote_images and not image_url.startswith("data:image/"):
+                image_url = _data_url_for_remote_image(image_url)
+            content.append({"type": "image_url", "image_url": {"url": image_url}})
+            continue
+
         file_id = item.get("file_id")
         if isinstance(file_id, str) and file_id:
-            file_ids.append(file_id)
+            raise ValueError(
+                "file_ids are not supported by custom chat-completions image "
+                "generation; use image_urls or image_paths instead"
+            )
 
-    extra_body: Dict[str, Any] = {}
-    if image_urls:
-        extra_body["image_urls"] = image_urls
-    if file_ids:
-        extra_body["file_ids"] = file_ids
-    if action and action != "auto":
-        extra_body["action"] = action
-    return extra_body
+    return [{"role": "user", "content": content}]
+
+
+def _image_extension_from_mime_subtype(subtype: str) -> str:
+    subtype = subtype.lower().split("+", 1)[0]
+    if subtype in {"jpeg", "jpg"}:
+        return "jpg"
+    if subtype in {"png", "webp", "gif"}:
+        return subtype
+    return "png"
+
+
+def _save_data_url(data_url: str, *, prefix: str) -> Optional[str]:
+    match = _DATA_URL_RE.search(data_url)
+    if not match:
+        return None
+    extension = _image_extension_from_mime_subtype(match.group(1))
+    b64 = "".join(match.group(2).split())
+    return str(save_b64_image(b64, prefix=prefix, extension=extension))
+
+
+def _extract_image_reference(value: Any, *, prefix: str) -> Optional[str]:
+    """Find an image URL or b64 payload in an OpenAI-compatible response."""
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+
+        saved = _save_data_url(stripped, prefix=prefix)
+        if saved:
+            return saved
+
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None:
+            found = _extract_image_reference(parsed, prefix=prefix)
+            if found:
+                return found
+
+        markdown_match = _MARKDOWN_IMAGE_RE.search(stripped)
+        if markdown_match:
+            found = _extract_image_reference(markdown_match.group(1), prefix=prefix)
+            if found:
+                return found
+
+        if stripped.startswith(("http://", "https://")):
+            return stripped
+
+        url_match = _URL_RE.search(stripped)
+        if url_match:
+            return url_match.group(0).rstrip(".,;")
+
+        return None
+
+    if isinstance(value, dict):
+        for key in ("b64_json", "base64", "image_base64"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return str(save_b64_image(raw.strip(), prefix=prefix))
+
+        for key in ("image", "url", "image_url", "output", "result"):
+            found = _extract_image_reference(value.get(key), prefix=prefix)
+            if found:
+                return found
+
+        for nested in value.values():
+            found = _extract_image_reference(nested, prefix=prefix)
+            if found:
+                return found
+        return None
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _extract_image_reference(item, prefix=prefix)
+            if found:
+                return found
+        return None
+
+    dumped = getattr(value, "model_dump", None)
+    if callable(dumped):
+        try:
+            found = _extract_image_reference(dumped(), prefix=prefix)
+            if found:
+                return found
+        except Exception:
+            logger.debug("Could not model_dump chat completion response", exc_info=True)
+
+    return None
+
+
+def _extract_chat_completion_image(
+    response: Any,
+    *,
+    prefix: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(image_ref, revised_prompt)`` from a chat-completions result."""
+    for choice in _field(response, "choices") or []:
+        message = _field(choice, "message")
+        if message is None:
+            continue
+
+        revised = _field(message, "revised_prompt")
+        image_ref = _extract_image_reference(_field(message, "content"), prefix=prefix)
+        if image_ref:
+            return image_ref, revised if isinstance(revised, str) else None
+
+        image_ref = _extract_image_reference(message, prefix=prefix)
+        if image_ref:
+            return image_ref, revised if isinstance(revised, str) else None
+
+    return _extract_image_reference(response, prefix=prefix), None
+
+
+def _create_chat_completion_image(
+    client: Any,
+    *,
+    input_content: List[Dict[str, Any]],
+) -> Any:
+    return client.chat.completions.create(
+        model=API_MODEL,
+        messages=_build_chat_completion_messages(
+            input_content,
+            inline_remote_images=True,
+        ),
+        stream=False,
+    )
 
 
 def _field(obj: Any, name: str) -> Any:
@@ -476,12 +649,44 @@ class OpenAIImageGenProvider(ImageGenProvider):
 
             if has_input_images:
                 if base_url:
-                    extra_body = _build_image_generation_extra_body(
-                        input_content,
-                        action=action,
+                    response = _create_chat_completion_image(
+                        client,
+                        input_content=input_content,
                     )
-                    if extra_body:
-                        payload["extra_body"] = extra_body
+                    image_ref, revised_prompt = _extract_chat_completion_image(
+                        response,
+                        prefix=f"openai_{tier_id}",
+                    )
+                    if not image_ref:
+                        return error_response(
+                            error=(
+                                "OpenAI chat completion response contained no "
+                                "image URL or base64 image"
+                            ),
+                            error_type="empty_response",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+
+                    extra: Dict[str, Any] = {
+                        "size": size,
+                        "quality": meta["quality"],
+                        "action": action,
+                        "input_image_count": input_image_count,
+                    }
+                    if revised_prompt:
+                        extra["revised_prompt"] = revised_prompt
+
+                    return success_response(
+                        image=image_ref,
+                        model=tier_id,
+                        prompt=prompt,
+                        aspect_ratio=aspect,
+                        provider="openai",
+                        extra=extra,
+                    )
                 else:
                     tool: Dict[str, Any] = {
                         "type": "image_generation",
