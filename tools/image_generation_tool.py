@@ -974,11 +974,10 @@ from tools.registry import registry, tool_error
 IMAGE_GENERATE_SCHEMA = {
     "name": "image_generate",
     "description": (
-        "Generate high-quality images from text prompts. The underlying "
-        "backend (FAL, OpenAI, etc.) and model are user-configured and not "
+        "Generate high-quality images from text prompts, with optional reference images. "
+        "The underlying backend (FAL, OpenAI, etc.) and model are user-configured and not "
         "selectable by the agent. Returns either a URL or an absolute file "
-        "path in the `image` field; display it with markdown "
-        "![description](url-or-path) and the gateway will deliver it."
+        "path in the `image` field."
     ),
     "parameters": {
         "type": "object",
@@ -997,9 +996,11 @@ IMAGE_GENERATE_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Optional reference/input image URLs for providers that "
+                    "Reference/input image URLs for providers that "
                     "support image-conditioned generation or editing. Use "
                     "fully qualified http(s) URLs or data:image/* base64 URLs."
+                    "**IMPORTANT**: IF THE USER PROVIDED REFERENCE IMAGES, THIS FIELD IS REQUIRED. "
+                    "ONLY WHEN THE USER DID NOT PROVIDE REFERENCE IMAGES, THIS FIELD IS OPTIONAL. "
                 ),
             },
             "image_paths": {
