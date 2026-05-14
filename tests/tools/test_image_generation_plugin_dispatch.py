@@ -30,6 +30,30 @@ class _FakeCodexProvider(ImageGenProvider):
         }
 
 
+class _RecordingProvider(ImageGenProvider):
+    def __init__(self):
+        self.kwargs = None
+
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        self.kwargs = {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            **kwargs,
+        }
+        return {
+            "success": True,
+            "image": "/tmp/recording-test.png",
+            "model": "recording-model",
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "provider": "recording",
+        }
+
+
 class TestPluginDispatch:
     def test_dispatch_routes_to_codex_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool
@@ -51,6 +75,39 @@ class TestPluginDispatch:
         assert payload["provider"] == "codex"
         assert payload["image"] == "/tmp/codex-test.png"
         assert payload["aspect_ratio"] == "square"
+
+    def test_dispatch_passes_reference_image_inputs(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+
+        provider = _RecordingProvider()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("image_gen:\n  provider: recording\n")
+
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "recording")
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: provider if name == "recording" else None)
+
+        dispatched = image_generation_tool._dispatch_to_plugin_provider(
+            "edit the image",
+            "square",
+            image_urls=["https://example.com/ref.png"],
+            image_paths=["C:/tmp/ref.png"],
+            file_ids=["file_123"],
+            action="edit",
+        )
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is True
+        assert provider.kwargs == {
+            "prompt": "edit the image",
+            "aspect_ratio": "square",
+            "image_urls": ["https://example.com/ref.png"],
+            "image_paths": ["C:/tmp/ref.png"],
+            "file_ids": ["file_123"],
+            "action": "edit",
+        }
 
     def test_dispatch_reports_missing_registered_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool

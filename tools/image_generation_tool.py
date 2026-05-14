@@ -915,10 +915,61 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "image_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional reference/input image URLs for providers that "
+                    "support image-conditioned generation or editing. Use "
+                    "fully qualified http(s) URLs or data:image/* base64 URLs."
+                ),
+            },
+            "image_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional local image file paths for providers that support "
+                    "image-conditioned generation or editing."
+                ),
+            },
+            "file_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional provider file IDs for previously uploaded input "
+                    "images, when supported by the active provider."
+                ),
+            },
+            "action": {
+                "type": "string",
+                "enum": ["auto", "generate", "edit"],
+                "description": (
+                    "Optional provider hint for image-conditioned requests. "
+                    "'auto' lets the provider choose whether to generate or edit; "
+                    "'generate' forces a new image; 'edit' forces editing an "
+                    "input image when one is provided."
+                ),
+                "default": "auto",
+            },
         },
         "required": ["prompt"],
     },
 }
+
+
+def _coerce_string_list(value) -> list[str]:
+    """Accept either a string or list-like value and return clean strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
 
 
 def _read_configured_image_model():
@@ -957,7 +1008,15 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    *,
+    image_urls: Optional[list[str]] = None,
+    image_paths: Optional[list[str]] = None,
+    file_ids: Optional[list[str]] = None,
+    action: Optional[str] = None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1013,6 +1072,14 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
         if configured_model:
             kwargs["model"] = configured_model
+        if image_urls:
+            kwargs["image_urls"] = image_urls
+        if image_paths:
+            kwargs["image_paths"] = image_paths
+        if file_ids:
+            kwargs["file_ids"] = file_ids
+        if action:
+            kwargs["action"] = action
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning(
@@ -1040,12 +1107,35 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    image_urls = _coerce_string_list(args.get("image_urls"))
+    image_paths = _coerce_string_list(args.get("image_paths"))
+    file_ids = _coerce_string_list(args.get("file_ids"))
+    action = args.get("action")
+    if isinstance(action, str):
+        action = action.strip().lower() or None
+    else:
+        action = None
+    if action and action not in {"auto", "generate", "edit"}:
+        return tool_error("action must be one of: auto, generate, edit")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(
+        prompt,
+        aspect_ratio,
+        image_urls=image_urls,
+        image_paths=image_paths,
+        file_ids=file_ids,
+        action=action,
+    )
     if dispatched is not None:
         return dispatched
+
+    if image_urls or image_paths or file_ids:
+        return tool_error(
+            "reference image inputs require an image_gen plugin provider "
+            "that supports them, such as image_gen.provider: openai"
+        )
 
     return image_generate_tool(
         prompt=prompt,
