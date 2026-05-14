@@ -226,10 +226,14 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
         target,
     )
 
-    if is_image:
-        ret = await target.send(asset_url, MessageTypes.IMAGE)
-    else:
-        ret = await target.send(asset_url, MessageTypes.FILE)
+    try:
+        if is_image:
+            ret = await target.send(asset_url, MessageTypes.IMAGE)
+        else:
+            ret = await target.send(asset_url, MessageTypes.FILE)
+    except Exception as e:
+        print("send_file_behind_link", "error=", e)
+        raise e
 
     print("send_file_behind_link", "ret=", ret)
     return ret
