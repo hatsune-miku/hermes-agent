@@ -158,7 +158,7 @@ class TestGenerate:
 
         call_kwargs = fake_client.images.generate.call_args.kwargs
         # All tiers hit the single underlying API model.
-        assert call_kwargs["model"] == "gpt-image-2"
+        assert call_kwargs["model"] == openai_plugin.API_MODEL
         assert call_kwargs["quality"] == "medium"
         assert call_kwargs["size"] == "1536x1024"
         # gpt-image-2 rejects response_format — we must NOT send it.
@@ -178,10 +178,9 @@ class TestGenerate:
             result = provider.generate("a cat")
 
         assert result["success"] is True
-        assert fake_openai.OpenAI.call_args.kwargs == {
-            "api_key": "test-key",
-            "base_url": "https://openai-proxy.example.com/v1",
-        }
+        client_kwargs = fake_openai.OpenAI.call_args.kwargs
+        assert client_kwargs["api_key"] == "test-key"
+        assert client_kwargs["base_url"] == "https://openai-proxy.example.com/v1"
 
     def test_empty_base_url_env_uses_default_endpoint(self, provider, monkeypatch):
         monkeypatch.setenv("IMAGE_GEN_OPENAI_BASEURL", "   ")
@@ -194,7 +193,47 @@ class TestGenerate:
             result = provider.generate("a cat")
 
         assert result["success"] is True
-        assert fake_openai.OpenAI.call_args.kwargs == {"api_key": "test-key"}
+        client_kwargs = fake_openai.OpenAI.call_args.kwargs
+        assert client_kwargs["api_key"] == "test-key"
+        assert "base_url" not in client_kwargs
+
+    def test_image_url_inputs_use_responses_api(self, provider):
+        fake_client = MagicMock()
+        fake_client.responses.create.return_value = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="image_generation_call",
+                    result=_b64_png(),
+                    revised_prompt="Edit the cat image",
+                )
+            ]
+        )
+
+        with _patched_openai(fake_client):
+            result = provider.generate(
+                "make it cinematic",
+                aspect_ratio="square",
+                image_urls=["https://example.com/cat.png"],
+                action="edit",
+            )
+
+        assert result["success"] is True
+        assert result["action"] == "edit"
+        assert result["input_image_count"] == 1
+        fake_client.images.generate.assert_not_called()
+
+        call_kwargs = fake_client.responses.create.call_args.kwargs
+        assert call_kwargs["model"] == openai_plugin.RESPONSES_MODEL
+        assert call_kwargs["tool_choice"] == {"type": "image_generation"}
+        assert call_kwargs["tools"][0]["type"] == "image_generation"
+        assert call_kwargs["tools"][0]["model"] == openai_plugin.API_MODEL
+        assert call_kwargs["tools"][0]["action"] == "edit"
+        content = call_kwargs["input"][0]["content"]
+        assert content[0] == {"type": "input_text", "text": "make it cinematic"}
+        assert content[1] == {
+            "type": "input_image",
+            "image_url": "https://example.com/cat.png",
+        }
 
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
@@ -213,7 +252,7 @@ class TestGenerate:
         assert result["quality"] == expected_quality
         assert fake_client.images.generate.call_args.kwargs["quality"] == expected_quality
         # Always the same underlying API model regardless of tier.
-        assert fake_client.images.generate.call_args.kwargs["model"] == "gpt-image-2"
+        assert fake_client.images.generate.call_args.kwargs["model"] == openai_plugin.API_MODEL
 
     @pytest.mark.parametrize("aspect,expected_size", [
         ("landscape", "1536x1024"),

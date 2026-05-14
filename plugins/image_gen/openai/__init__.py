@@ -32,9 +32,13 @@ Selection precedence (first hit wins):
 
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -59,6 +63,9 @@ logger = logging.getLogger(__name__)
 API_MODEL = "gpt-image-2-vip"
 API_KEY_ENV = "IMAGE_GEN_OPENAI_API_KEY"
 BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
+RESPONSES_MODEL = "gpt-5.5"
+MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
+VALID_IMAGE_ACTIONS = {"auto", "generate", "edit"}
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "gpt-image-2-low": {
@@ -153,6 +160,104 @@ def _build_openai_client(openai_module: Any) -> Any:
 
     print("full args passed to openai:", client_kwargs)
     return openai_module.OpenAI(**client_kwargs)
+
+
+def _coerce_string_list(value: Any) -> List[str]:
+    """Accept either a single string or list-like input and return clean strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _data_url_for_image_path(raw_path: str) -> str:
+    """Return a data URL for a local image file path."""
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Input image path does not exist or is not a file: {raw_path}")
+
+    size = path.stat().st_size
+    if size > MAX_INPUT_IMAGE_BYTES:
+        limit_mb = MAX_INPUT_IMAGE_BYTES // (1024 * 1024)
+        raise ValueError(f"Input image is too large: {raw_path} exceeds {limit_mb}MB")
+
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    if not mime_type.startswith("image/"):
+        raise ValueError(f"Input file is not recognized as an image: {raw_path}")
+
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _validate_image_url(value: str) -> str:
+    """Return a supported image URL/data URL or raise a clear error."""
+    if value.startswith("data:image/"):
+        return value
+
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return value
+
+    raise ValueError(
+        "Input image URLs must be fully qualified http(s) URLs or data:image/* URLs"
+    )
+
+
+def _build_input_image_content(
+    *,
+    prompt: str,
+    image_urls: Any = None,
+    image_paths: Any = None,
+    file_ids: Any = None,
+) -> List[Dict[str, Any]]:
+    """Build Responses API message content with text plus input images."""
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+
+    for image_url in _coerce_string_list(image_urls):
+        content.append({
+            "type": "input_image",
+            "image_url": _validate_image_url(image_url),
+        })
+
+    for image_path in _coerce_string_list(image_paths):
+        content.append({
+            "type": "input_image",
+            "image_url": _data_url_for_image_path(image_path),
+        })
+
+    for file_id in _coerce_string_list(file_ids):
+        content.append({"type": "input_image", "file_id": file_id})
+
+    return content
+
+
+def _input_image_count(content: List[Dict[str, Any]]) -> int:
+    return sum(1 for item in content if item.get("type") == "input_image")
+
+
+def _field(obj: Any, name: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _extract_response_image(response: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(b64_image, revised_prompt)`` from a Responses API result."""
+    for item in _field(response, "output") or []:
+        if _field(item, "type") != "image_generation_call":
+            continue
+        result = _field(item, "result")
+        if isinstance(result, str) and result:
+            revised = _field(item, "revised_prompt")
+            return result, revised if isinstance(revised, str) else None
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +359,40 @@ class OpenAIImageGenProvider(ImageGenProvider):
         tier_id, meta = _resolve_model()
         size = _SIZES.get(aspect, _SIZES["square"])
 
+        action = kwargs.get("action")
+        if isinstance(action, str):
+            action = action.strip().lower() or "auto"
+        else:
+            action = "auto"
+        if action not in VALID_IMAGE_ACTIONS:
+            return error_response(
+                error="action must be one of: auto, generate, edit",
+                error_type="invalid_argument",
+                provider="openai",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        try:
+            input_content = _build_input_image_content(
+                prompt=prompt,
+                image_urls=kwargs.get("image_urls") or kwargs.get("image_url"),
+                image_paths=kwargs.get("image_paths") or kwargs.get("image_path"),
+                file_ids=kwargs.get("file_ids") or kwargs.get("file_id"),
+            )
+        except ValueError as exc:
+            return error_response(
+                error=str(exc),
+                error_type="invalid_argument",
+                provider="openai",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        has_input_images = _input_image_count(input_content) > 0
+
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
         payload: Dict[str, Any] = {
@@ -266,6 +405,64 @@ class OpenAIImageGenProvider(ImageGenProvider):
 
         try:
             client = _build_openai_client(openai)
+
+            if has_input_images:
+                tool: Dict[str, Any] = {
+                    "type": "image_generation",
+                    "model": API_MODEL,
+                    "size": size,
+                    "quality": meta["quality"],
+                    "output_format": "png",
+                    "action": action,
+                }
+                response = client.responses.create(
+                    model=RESPONSES_MODEL,
+                    input=[{
+                        "role": "user",
+                        "content": input_content,
+                    }],
+                    tools=[tool],
+                    tool_choice={"type": "image_generation"},
+                )
+                b64, revised_prompt = _extract_response_image(response)
+                if not b64:
+                    return error_response(
+                        error="OpenAI response contained no image_generation_call result",
+                        error_type="empty_response",
+                        provider="openai",
+                        model=tier_id,
+                        prompt=prompt,
+                        aspect_ratio=aspect,
+                    )
+                try:
+                    saved_path = save_b64_image(b64, prefix=f"openai_{tier_id}")
+                except Exception as exc:
+                    return error_response(
+                        error=f"Could not save image to cache: {exc}",
+                        error_type="io_error",
+                        provider="openai",
+                        model=tier_id,
+                        prompt=prompt,
+                        aspect_ratio=aspect,
+                    )
+
+                extra: Dict[str, Any] = {
+                    "size": size,
+                    "quality": meta["quality"],
+                    "action": action,
+                    "input_image_count": _input_image_count(input_content),
+                }
+                if revised_prompt:
+                    extra["revised_prompt"] = revised_prompt
+
+                return success_response(
+                    image=str(saved_path),
+                    model=tier_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                    provider="openai",
+                    extra=extra,
+                )
 
             print("creating image with payload:", payload)
             response = client.images.generate(**payload)
