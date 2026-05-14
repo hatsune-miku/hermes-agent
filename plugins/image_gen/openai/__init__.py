@@ -22,7 +22,10 @@ used.
 Credentials are read from ``IMAGE_GEN_OPENAI_API_KEY`` so image generation can
 use a dedicated OpenAI-compatible key independent from the chat/model provider.
 For image-conditioned requests, ``IMAGE_GEN_OPENAI_RESPONSES_MODEL`` can
-override the Responses API host model.
+override the Responses API host model. When a custom base URL is configured,
+image-conditioned requests use ``/images/generations`` instead and pass
+reference images through the request body for OpenAI-compatible gateways that
+do not implement the Responses API.
 
 Selection precedence (first hit wins):
 
@@ -143,7 +146,6 @@ def _resolve_base_url() -> Optional[str]:
     if not isinstance(base_url, str):
         return None
     base_url = base_url.strip()
-    print("image_gen base url:", base_url)
     return base_url or None
 
 
@@ -155,21 +157,20 @@ def _resolve_responses_model() -> str:
     return RESPONSES_MODEL
 
 
-def _build_openai_client(openai_module: Any) -> Any:
+def _build_openai_client(openai_module: Any, base_url: Optional[str] = None) -> Any:
     """Build an OpenAI client, honoring the image-gen-specific base URL."""
     api_key = os.environ.get(API_KEY_ENV)
-    print("image_gen base url:", api_key)
     client_kwargs: Dict[str, Any] = {
         "api_key": api_key,
         "default_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
         },
     }
-    base_url = _resolve_base_url()
+    if base_url is None:
+        base_url = _resolve_base_url()
     if base_url:
         client_kwargs["base_url"] = base_url
 
-    print("full args passed to openai:", client_kwargs)
     return openai_module.OpenAI(**client_kwargs)
 
 
@@ -259,6 +260,34 @@ def _input_image_count(content: List[Dict[str, Any]]) -> int:
     return sum(1 for item in content if item.get("type") == "input_image")
 
 
+def _build_image_generation_extra_body(
+    input_content: List[Dict[str, Any]],
+    *,
+    action: str,
+) -> Dict[str, Any]:
+    """Build extra request body fields for custom ``images.generate`` gateways."""
+    image_urls: List[str] = []
+    file_ids: List[str] = []
+    for item in input_content:
+        if item.get("type") != "input_image":
+            continue
+        image_url = item.get("image_url")
+        if isinstance(image_url, str) and image_url:
+            image_urls.append(image_url)
+        file_id = item.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            file_ids.append(file_id)
+
+    extra_body: Dict[str, Any] = {}
+    if image_urls:
+        extra_body["image_urls"] = image_urls
+    if file_ids:
+        extra_body["file_ids"] = file_ids
+    if action and action != "auto":
+        extra_body["action"] = action
+    return extra_body
+
+
 def _field(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(name)
@@ -284,7 +313,6 @@ def _create_image_response(
     input_content: List[Dict[str, Any]],
     tool: Dict[str, Any],
 ) -> Any:
-    print("input_content", input_content)
     return client.responses.create(
         model=model,
         input=[
@@ -296,47 +324,6 @@ def _create_image_response(
         tools=[tool],
         tool_choice={"type": "image_generation"},
     )
-
-
-def _create_image_response_with_fallback(
-    client: Any,
-    *,
-    input_content: List[Dict[str, Any]],
-    tool: Dict[str, Any],
-) -> Any:
-    """Create a Responses image result, retrying custom gateways with API_MODEL.
-
-    Some OpenAI-compatible image gateways route Responses image_generation
-    requests through a draw endpoint keyed by the top-level ``model`` field.
-    Those gateways may not have a generic chat host model like gpt-5.5
-    configured for drawing, so retry with the actual image model when a custom
-    base URL is in use.
-    """
-    host_model = _resolve_responses_model()
-    print("host_model:", host_model)
-    try:
-        return _create_image_response(
-            client,
-            model=host_model,
-            input_content=input_content,
-            tool=tool,
-        )
-    except Exception:
-        base_url = _resolve_base_url()
-        if not base_url or host_model == API_MODEL:
-            raise
-        logger.debug(
-            "Responses image request failed with host model %s; retrying with %s",
-            host_model,
-            API_MODEL,
-            exc_info=True,
-        )
-        return _create_image_response(
-            client,
-            model=API_MODEL,
-            input_content=input_content,
-            tool=tool,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +457,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        has_input_images = _input_image_count(input_content) > 0
-        print("_input_image_count(input_content):", _input_image_count(input_content))
+        input_image_count = _input_image_count(input_content)
+        has_input_images = input_image_count > 0
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
@@ -484,63 +471,75 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = _build_openai_client(openai)
+            base_url = _resolve_base_url()
+            client = _build_openai_client(openai, base_url=base_url)
 
             if has_input_images:
-                tool: Dict[str, Any] = {
-                    "type": "image_generation",
-                    "model": API_MODEL,
-                    "size": size,
-                    "quality": meta["quality"],
-                    "output_format": "png",
-                    "action": action,
-                }
-                response = _create_image_response_with_fallback(
-                    client,
-                    input_content=input_content,
-                    tool=tool,
-                )
-                b64, revised_prompt = _extract_response_image(response)
-                if not b64:
-                    return error_response(
-                        error="OpenAI response contained no image_generation_call result",
-                        error_type="empty_response",
-                        provider="openai",
+                if base_url:
+                    extra_body = _build_image_generation_extra_body(
+                        input_content,
+                        action=action,
+                    )
+                    if extra_body:
+                        payload["extra_body"] = extra_body
+                else:
+                    tool: Dict[str, Any] = {
+                        "type": "image_generation",
+                        "model": API_MODEL,
+                        "size": size,
+                        "quality": meta["quality"],
+                        "output_format": "png",
+                        "action": action,
+                    }
+                    response = _create_image_response(
+                        client,
+                        model=_resolve_responses_model(),
+                        input_content=input_content,
+                        tool=tool,
+                    )
+                    b64, revised_prompt = _extract_response_image(response)
+                    if not b64:
+                        return error_response(
+                            error=(
+                                "OpenAI response contained no "
+                                "image_generation_call result"
+                            ),
+                            error_type="empty_response",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+                    try:
+                        saved_path = save_b64_image(b64, prefix=f"openai_{tier_id}")
+                    except Exception as exc:
+                        return error_response(
+                            error=f"Could not save image to cache: {exc}",
+                            error_type="io_error",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+
+                    extra: Dict[str, Any] = {
+                        "size": size,
+                        "quality": meta["quality"],
+                        "action": action,
+                        "input_image_count": input_image_count,
+                    }
+                    if revised_prompt:
+                        extra["revised_prompt"] = revised_prompt
+
+                    return success_response(
+                        image=str(saved_path),
                         model=tier_id,
                         prompt=prompt,
                         aspect_ratio=aspect,
-                    )
-                try:
-                    saved_path = save_b64_image(b64, prefix=f"openai_{tier_id}")
-                except Exception as exc:
-                    return error_response(
-                        error=f"Could not save image to cache: {exc}",
-                        error_type="io_error",
                         provider="openai",
-                        model=tier_id,
-                        prompt=prompt,
-                        aspect_ratio=aspect,
+                        extra=extra,
                     )
 
-                extra: Dict[str, Any] = {
-                    "size": size,
-                    "quality": meta["quality"],
-                    "action": action,
-                    "input_image_count": _input_image_count(input_content),
-                }
-                if revised_prompt:
-                    extra["revised_prompt"] = revised_prompt
-
-                return success_response(
-                    image=str(saved_path),
-                    model=tier_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                    provider="openai",
-                    extra=extra,
-                )
-
-            print("creating image with payload:", payload)
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
@@ -597,6 +596,9 @@ class OpenAIImageGenProvider(ImageGenProvider):
             )
 
         extra: Dict[str, Any] = {"size": size, "quality": meta["quality"]}
+        if has_input_images:
+            extra["action"] = action
+            extra["input_image_count"] = input_image_count
         if revised_prompt:
             extra["revised_prompt"] = revised_prompt
 

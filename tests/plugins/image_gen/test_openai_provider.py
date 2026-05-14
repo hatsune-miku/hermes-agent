@@ -235,31 +235,32 @@ class TestGenerate:
             "image_url": "https://example.com/cat.png",
         }
 
-    def test_custom_base_url_responses_retry_uses_image_model(self, provider, monkeypatch):
-        monkeypatch.setenv("IMAGE_GEN_OPENAI_BASEURL", "https://openai-proxy.example.com/v1")
+    def test_custom_base_url_image_inputs_use_images_generate(self, provider, monkeypatch):
+        monkeypatch.setenv(
+            "IMAGE_GEN_OPENAI_BASEURL",
+            "https://openai-proxy.example.com/v1",
+        )
         fake_client = MagicMock()
-        fake_client.responses.create.side_effect = [
-            RuntimeError("endpoint /draw has no model configured"),
-            SimpleNamespace(
-                output=[
-                    SimpleNamespace(
-                        type="image_generation_call",
-                        result=_b64_png(),
-                    )
-                ]
-            ),
-        ]
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
 
         with _patched_openai(fake_client):
             result = provider.generate(
                 "make it cinematic",
                 image_urls=["https://example.com/cat.png"],
+                action="edit",
             )
 
         assert result["success"] is True
-        first_call, second_call = fake_client.responses.create.call_args_list
-        assert first_call.kwargs["model"] == openai_plugin.RESPONSES_MODEL
-        assert second_call.kwargs["model"] == openai_plugin.API_MODEL
+        assert result["action"] == "edit"
+        assert result["input_image_count"] == 1
+        fake_client.responses.create.assert_not_called()
+
+        call_kwargs = fake_client.images.generate.call_args.kwargs
+        assert call_kwargs["model"] == openai_plugin.API_MODEL
+        assert call_kwargs["extra_body"] == {
+            "image_urls": ["https://example.com/cat.png"],
+            "action": "edit",
+        }
 
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
