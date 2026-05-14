@@ -5,7 +5,7 @@ import tempfile
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from gateway.config import Platform
@@ -204,6 +204,7 @@ class KookAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
         if not self._bot:
@@ -486,4 +487,3 @@ def _filename_from_url(url: str) -> str:
     if not name or "." not in name:
         return "image.png"
     return name
-

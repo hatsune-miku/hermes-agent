@@ -192,7 +192,9 @@ def _data_url_for_image_path(raw_path: str) -> str:
     """Return a data URL for a local image file path."""
     path = Path(raw_path).expanduser()
     if not path.is_file():
-        raise ValueError(f"Input image path does not exist or is not a file: {raw_path}")
+        raise ValueError(
+            f"Input image path does not exist or is not a file: {raw_path}"
+        )
 
     size = path.stat().st_size
     if size > MAX_INPUT_IMAGE_BYTES:
@@ -232,16 +234,20 @@ def _build_input_image_content(
     content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
 
     for image_url in _coerce_string_list(image_urls):
-        content.append({
-            "type": "input_image",
-            "image_url": _validate_image_url(image_url),
-        })
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": _validate_image_url(image_url),
+            }
+        )
 
     for image_path in _coerce_string_list(image_paths):
-        content.append({
-            "type": "input_image",
-            "image_url": _data_url_for_image_path(image_path),
-        })
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": _data_url_for_image_path(image_path),
+            }
+        )
 
     for file_id in _coerce_string_list(file_ids):
         content.append({"type": "input_image", "file_id": file_id})
@@ -278,12 +284,15 @@ def _create_image_response(
     input_content: List[Dict[str, Any]],
     tool: Dict[str, Any],
 ) -> Any:
+    print("input_content", input_content)
     return client.responses.create(
         model=model,
-        input=[{
-            "role": "user",
-            "content": input_content,
-        }],
+        input=[
+            {
+                "role": "user",
+                "content": input_content,
+            }
+        ],
         tools=[tool],
         tool_choice={"type": "image_generation"},
     )
@@ -304,6 +313,7 @@ def _create_image_response_with_fallback(
     base URL is in use.
     """
     host_model = _resolve_responses_model()
+    print("host_model:", host_model)
     try:
         return _create_image_response(
             client,
@@ -461,6 +471,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
             )
 
         has_input_images = _input_image_count(input_content) > 0
+        print("_input_image_count(input_content):", _input_image_count(input_content))
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
