@@ -210,7 +210,7 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
 
     print("asset_url=", asset_url)
 
-    ret = await target.send(asset_url, MessageTypes.FILE)
+    ret = await target.send(asset_url, type=MessageTypes.FILE)
     print("send_file_behind_link", "ret=", ret)
     return ret
 
