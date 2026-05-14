@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # ``quality`` setting. ``api_model`` is what gets sent to OpenAI;
 # ``quality`` is the knob that changes generation time and output fidelity.
 
-API_MODEL = "gpt-image-2"
+API_MODEL = "gpt-image-2-vip"
 API_KEY_ENV = "IMAGE_GEN_OPENAI_API_KEY"
 BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
 
