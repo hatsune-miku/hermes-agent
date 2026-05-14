@@ -10045,7 +10045,7 @@ class GatewayRunner:
             force_document_attachments = "[[as_document]]" in response
 
             media_files, _ = adapter.extract_media(response)
-            _, cleaned = adapter.extract_images(response)
+            remote_images, cleaned = adapter.extract_images(response)
             local_files, _ = adapter.extract_local_files(cleaned)
 
             _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
@@ -10077,6 +10077,16 @@ class GatewayRunner:
                     image_paths.append(file_path)
                 else:
                     non_image_local.append(file_path)
+
+            if remote_images:
+                try:
+                    await adapter.send_multiple_images(
+                        chat_id=event.source.chat_id,
+                        images=remote_images,
+                        metadata=_thread_meta,
+                    )
+                except Exception as e:
+                    logger.warning("[%s] Post-stream remote image delivery failed: %s", adapter.name, e)
 
             if image_paths:
                 try:

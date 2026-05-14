@@ -608,10 +608,14 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
+        has_media_directive = "MEDIA:" in text or "[[audio_as_voice]]" in text
+        has_image_markup = "![" in text or "<img" in text.lower()
+        if not has_media_directive and not has_image_markup:
             return text
         cleaned = text.replace("[[audio_as_voice]]", "")
         cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+        if has_image_markup:
+            _, cleaned = _BasePlatformAdapter.extract_images(cleaned)
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         # Strip trailing whitespace/newlines but preserve leading content
