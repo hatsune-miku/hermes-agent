@@ -429,25 +429,68 @@ def test_send_image_file_uploads_asset_and_preserves_dm_metadata(monkeypatch):
     asyncio.run(_run())
 
 
-def test_send_remote_image_skips_upload_and_sends_caption(monkeypatch):
+def test_send_image_passes_through_kook_cdn_url(monkeypatch):
     _install_fake_khl(monkeypatch)
     from khl import MessageTypes
     from plugins.platforms.kook.adapter import KookAdapter
 
     async def _run():
         adapter = KookAdapter(_config(token="token-123"))
-        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "img-msg-2"}))
+        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "img-cdn"}))
         adapter._bot = SimpleNamespace(
             client=SimpleNamespace(fetch_public_channel=AsyncMock(return_value=channel), create_asset=AsyncMock())
         )
 
-        result = await adapter.send_image("channel-1", "https://example.com/image.png", caption="caption")
+        url = "https://img.kookapp.cn/attachments/2026-05/foo.png"
+        result = await adapter.send_image("channel-1", url, caption="cap")
 
         assert result.success is True
-        assert result.message_id == "img-msg-2"
+        assert result.message_id == "img-cdn"
         adapter._bot.client.create_asset.assert_not_called()
-        channel.send.assert_any_await("https://example.com/image.png", type=MessageTypes.IMG)
-        channel.send.assert_any_await("caption", type=MessageTypes.KMD)
+        channel.send.assert_any_await(url, type=MessageTypes.IMG)
+        channel.send.assert_any_await("cap", type=MessageTypes.KMD)
+
+    asyncio.run(_run())
+
+
+def test_send_image_downloads_external_url_then_uploads(monkeypatch, tmp_path):
+    _install_fake_khl(monkeypatch)
+    from khl import MessageTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    downloads = {}
+
+    def fake_download(url, dest):
+        downloads["url"] = url
+        downloads["dest"] = dest
+        dest.write_bytes(b"png-bytes")
+
+    monkeypatch.setattr("plugins.platforms.kook.adapter._download_to_path", fake_download)
+    monkeypatch.setattr("plugins.platforms.kook.adapter._scratch_dir", lambda: tmp_path)
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "img-ext"}))
+        adapter._bot = SimpleNamespace(
+            client=SimpleNamespace(
+                fetch_public_channel=AsyncMock(return_value=channel),
+                create_asset=AsyncMock(return_value="https://img.kookapp.cn/attachments/2026-05/x.png"),
+            )
+        )
+
+        result = await adapter.send_image(
+            "channel-1", "https://example.com/somewhere/image.png", caption="cap"
+        )
+
+        assert result.success is True
+        assert result.message_id == "img-ext"
+        assert downloads["url"] == "https://example.com/somewhere/image.png"
+        assert downloads["dest"].suffix == ".png"
+        adapter._bot.client.create_asset.assert_awaited_once_with(downloads["dest"])
+        channel.send.assert_any_await(
+            "https://img.kookapp.cn/attachments/2026-05/x.png", type=MessageTypes.IMG
+        )
+        channel.send.assert_any_await("cap", type=MessageTypes.KMD)
 
     asyncio.run(_run())
 

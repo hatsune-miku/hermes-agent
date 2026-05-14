@@ -87,7 +87,12 @@ async def _kook_raw_request(method: str, endpoint: str, body: str) -> Any:
         if normalized_method in _QUERY_METHODS
         else {"json": payload}
     )
-    return await bot.client.gate.request_endpoint(normalized_method, endpoint, **kwargs)
+    try:
+        return await bot.client.gate.request_endpoint(
+            normalized_method, endpoint, **kwargs
+        )
+    finally:
+        await _close_bot_session(bot)
 
 
 def _parse_body(body: str) -> dict[str, Any]:
@@ -108,7 +113,8 @@ SEND_FILE_BEHIND_LINK_SCHEMA = {
         "When you need to send a file or image but you only have a direct URL, "
         "you MUST use this tool to deliver it. The tool automatically downloads the URL, "
         "renames it to ``file_name``, and sends it as a KOOK file attachment "
-        "to the current chat, in the correct way."
+        "to the current chat, in the correct way. DO NOT DO THIS BY YOURSELF, "
+        "let the tool handle it automatically."
     ),
     "parameters": {
         "type": "object",
@@ -202,29 +208,45 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
     from khl import Bot, MessageTypes
 
     bot = Bot(token=token)
-    asset_url = await bot.client.create_asset(dest)
-    if is_dm:
-        target = await bot.client.fetch_user(chat_id)
-    else:
-        target = await bot.client.fetch_public_channel(chat_id)
+    try:
+        asset_url = await bot.client.create_asset(dest)
+        if is_dm:
+            target = await bot.client.fetch_user(chat_id)
+        else:
+            target = await bot.client.fetch_public_channel(chat_id)
 
-    print("asset_url=", asset_url)
-    is_image = name.lower().endswith((
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".jfif",
-        ".webp",
-    ))
-    print("is_image=", is_image)
+        print("asset_url=", asset_url)
+        is_image = name.lower().endswith((
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".jfif",
+            ".webp",
+        ))
+        print("is_image=", is_image)
 
-    if is_image:
-        ret = await target.send(asset_url, type=MessageTypes.IMG)
-    else:
-        ret = await target.send(asset_url, type=MessageTypes.FILE)
-    print("send_file_behind_link", "ret=", ret)
-    return ret
+        if is_image:
+            ret = await target.send(asset_url, type=MessageTypes.IMG)
+        else:
+            ret = await target.send(asset_url, type=MessageTypes.FILE)
+        print("send_file_behind_link", "ret=", ret)
+        return ret
+    finally:
+        await _close_bot_session(bot)
+
+
+async def _close_bot_session(bot) -> None:
+    requester = getattr(
+        getattr(getattr(bot, "client", None), "gate", None), "requester", None
+    )
+    cs = getattr(requester, "_cs", None)
+    if cs is None:
+        return
+    try:
+        await cs.close()
+    except Exception:
+        logger.debug("KOOK: failed to close aiohttp session", exc_info=True)
 
 
 def check_send_file_behind_link_requirements() -> bool:

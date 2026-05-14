@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import os
+import tempfile
 from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from gateway.config import Platform
 from gateway.platforms.base import (
@@ -146,6 +148,23 @@ class KookAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._bot:
             return SendResult(success=False, error="KOOK bot is not connected")
+        # External http(s) URLs must be downloaded and re-uploaded through the
+        # KOOK asset API; sending a foreign URL directly fails.  Only URLs on
+        # the KOOK CDN (img.kookapp.cn) can be forwarded as-is.
+        if image_url.startswith(("http://", "https://")) and "img.kookapp.cn" not in image_url:
+            try:
+                dest = _scratch_dir() / _filename_from_url(image_url)
+                _download_to_path(image_url, dest)
+            except Exception as exc:
+                logger.warning("KOOK: failed to download external image %s: %s", image_url, exc)
+                return SendResult(success=False, error=str(exc))
+            return await self.send_image_file(
+                chat_id=chat_id,
+                image_path=str(dest),
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
         try:
             target = await self._resolve_send_target(chat_id, metadata)
             _, _, _, MessageTypes = _khl()
@@ -445,3 +464,26 @@ def register(ctx) -> None:
         check_fn=check_send_file_behind_link_requirements,
         emoji="📎",
     )
+
+def _scratch_dir() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def _download_to_path(url: str, dest: Path) -> None:
+    import httpx
+
+    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
+        response.raise_for_status()
+        with dest.open("wb") as fp:
+            for chunk in response.iter_bytes():
+                if chunk:
+                    fp.write(chunk)
+
+
+def _filename_from_url(url: str) -> str:
+    path = urlparse(url).path
+    name = path.rsplit("/", 1)[-1] if path else ""
+    if not name or "." not in name:
+        return "image.png"
+    return name
+
