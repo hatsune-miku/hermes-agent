@@ -151,12 +151,17 @@ class KookAdapter(BasePlatformAdapter):
         # External http(s) URLs must be downloaded and re-uploaded through the
         # KOOK asset API; sending a foreign URL directly fails.  Only URLs on
         # the KOOK CDN (img.kookapp.cn) can be forwarded as-is.
-        if image_url.startswith(("http://", "https://")) and "img.kookapp.cn" not in image_url:
+        if (
+            image_url.startswith(("http://", "https://"))
+            and "img.kookapp.cn" not in image_url
+        ):
             try:
                 dest = _scratch_dir() / _filename_from_url(image_url)
                 _download_to_path(image_url, dest)
             except Exception as exc:
-                logger.warning("KOOK: failed to download external image %s: %s", image_url, exc)
+                logger.warning(
+                    "KOOK: failed to download external image %s: %s", image_url, exc
+                )
                 return SendResult(success=False, error=str(exc))
             return await self.send_image_file(
                 chat_id=chat_id,
@@ -333,12 +338,14 @@ class KookAdapter(BasePlatformAdapter):
     def _store_group_history(
         self, chat_id: str, author: Any, text: str, message_id: Any
     ) -> None:
-        self._group_history[chat_id].append({
-            "user": _display_name(author) or str(getattr(author, "id", "")),
-            "text": text,
-            "message_id": str(message_id or ""),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        })
+        self._group_history[chat_id].append(
+            {
+                "user": _display_name(author) or str(getattr(author, "id", "")),
+                "text": text,
+                "message_id": str(message_id or ""),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
 
     def _with_ambient_history(self, chat_id: str, text: str) -> str:
         history = list(self._group_history.get(chat_id, []))
@@ -457,14 +464,15 @@ def register(ctx) -> None:
         emoji="🎮",
     )
 
-    ctx.register_tool(
-        name="send_file_behind_link",
-        toolset="kook",
-        schema=SEND_FILE_BEHIND_LINK_SCHEMA,
-        handler=handle_send_file_behind_link,
-        check_fn=check_send_file_behind_link_requirements,
-        emoji="📎",
-    )
+    # ctx.register_tool(
+    #     name="send_file_behind_link",
+    #     toolset="kook",
+    #     schema=SEND_FILE_BEHIND_LINK_SCHEMA,
+    #     handler=handle_send_file_behind_link,
+    #     check_fn=check_send_file_behind_link_requirements,
+    #     emoji="📎",
+    # )
+
 
 def _scratch_dir() -> Path:
     return Path(tempfile.gettempdir())
