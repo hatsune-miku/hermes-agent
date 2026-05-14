@@ -131,6 +131,8 @@ def handle_send_file_behind_link(body, **kwargs) -> str:
     try:
         url = body.get("url") if isinstance(body, dict) else ""
         file_name = body.get("file_name") if isinstance(body, dict) else ""
+        print("send_file_behind_link", "url=", url, "file_name=", file_name)
+
         result = asyncio.run(
             _send_file_behind_link(url=url or "", file_name=file_name or "")
         )
@@ -180,6 +182,20 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
     user_id = get_session_env("HERMES_SESSION_USER_ID", "").strip()
     is_dm = bool(user_id) and user_id == chat_id
 
+    print(
+        "send_file_behind_link",
+        "url=",
+        url,
+        "file_name=",
+        name,
+        "is_dm=",
+        is_dm,
+        "chat_id=",
+        chat_id,
+        "user_id=",
+        user_id,
+    )
+
     dest = _scratch_dir() / name
     _download_to_path(url, dest)
 
@@ -200,6 +216,14 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
         ".jfif",
         ".webp",
     ))
+    print(
+        "send_file_behind_link",
+        "is_image=",
+        is_image,
+        "target=",
+        target,
+    )
+
     if is_image:
         return await target.send(asset_url, MessageTypes.IMAGE)
     else:
