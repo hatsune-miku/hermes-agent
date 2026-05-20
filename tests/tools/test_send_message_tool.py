@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2332,6 +2333,54 @@ class TestSendViaAdapterLiveMediaDispatch:
         # Empty text means send() should not be called, only send_document
         names = [name for name, _ in calls]
         assert names == ["send_document"]
+
+    @pytest.mark.asyncio
+    async def test_live_adapter_dispatches_on_gateway_loop_when_available(self, monkeypatch):
+        """In-process plugin sends must run on the gateway loop, not the
+        tool/agent loop.  KOOK's khl/aiohttp client is bound to the gateway
+        loop; awaiting it from the tool loop raises aiohttp's
+        'Timeout context manager should be used inside a task'."""
+        from gateway.platforms.base import SendResult
+        from tools.send_message_tool import _send_via_adapter
+
+        gateway_loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def loop_thread():
+            asyncio.set_event_loop(gateway_loop)
+            ready.set()
+            gateway_loop.run_forever()
+
+        thread = threading.Thread(target=loop_thread, daemon=True)
+        thread.start()
+        assert ready.wait(timeout=2)
+
+        send_loop = None
+
+        async def send(**kwargs):
+            nonlocal send_loop
+            send_loop = asyncio.get_running_loop()
+            return SendResult(success=True, message_id="gw-loop-id")
+
+        try:
+            platform = _FakePlatform("kook")
+            adapter = SimpleNamespace(send=send, platform=Platform("kook"))
+            runner = SimpleNamespace(adapters={platform: adapter}, _gateway_loop=gateway_loop)
+            monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+
+            result = await _send_via_adapter(
+                platform,
+                SimpleNamespace(extra={}),
+                "chat-9",
+                "hi from tool loop",
+            )
+        finally:
+            gateway_loop.call_soon_threadsafe(gateway_loop.stop)
+            thread.join(timeout=2)
+            gateway_loop.close()
+
+        assert result == {"success": True, "message_id": "gw-loop-id"}
+        assert send_loop is gateway_loop
 
     @pytest.mark.asyncio
     async def test_live_adapter_media_failure_aborts_with_error(self, monkeypatch):

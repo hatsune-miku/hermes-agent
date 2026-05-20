@@ -157,7 +157,7 @@ class KookAdapter(BasePlatformAdapter):
         ):
             try:
                 dest = _scratch_dir() / _filename_from_url(image_url)
-                _download_to_path(image_url, dest)
+                await _download_to_path(image_url, dest)
             except Exception as exc:
                 logger.warning(
                     "KOOK: failed to download external image %s: %s", image_url, exc
@@ -522,15 +522,15 @@ def _scratch_dir() -> Path:
     return Path(tempfile.gettempdir())
 
 
-def _download_to_path(url: str, dest: Path) -> None:
+async def _download_to_path(url: str, dest: Path) -> None:
     import httpx
-
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
-        response.raise_for_status()
-        with dest.open("wb") as fp:
-            for chunk in response.iter_bytes():
-                if chunk:
-                    fp.write(chunk)
+    async with httpx.AsyncClient() as client:
+        async with client.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
+            response.raise_for_status()
+            with dest.open("wb") as fp:
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        fp.write(chunk)
 
 
 def _filename_from_url(url: str) -> str:

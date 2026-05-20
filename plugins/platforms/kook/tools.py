@@ -34,15 +34,13 @@ SEND_FILE_BEHIND_LINK_SCHEMA = {
 }
 
 
-def handle_send_file_behind_link(body, **kwargs) -> str:
+async def handle_send_file_behind_link(body, **kwargs) -> str:
     try:
         url = body.get("url") if isinstance(body, dict) else ""
         file_name = body.get("file_name") if isinstance(body, dict) else ""
         print("send_file_behind_link", "url=", url, "file_name=", file_name)
 
-        result = asyncio.run(
-            _send_file_behind_link(url=url or "", file_name=file_name or "")
-        )
+        result = await _send_file_behind_link(url=url or "", file_name=file_name or "")
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         logger.warning("send_file_behind_link failed: %s", exc)
@@ -53,15 +51,15 @@ def _scratch_dir() -> Path:
     return Path(tempfile.gettempdir())
 
 
-def _download_to_path(url: str, dest: Path) -> None:
+async def _download_to_path(url: str, dest: Path) -> None:
     import httpx
-
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
-        response.raise_for_status()
-        with dest.open("wb") as fp:
-            for chunk in response.iter_bytes():
-                if chunk:
-                    fp.write(chunk)
+    async with httpx.AsyncClient() as client:
+        async with client.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
+            response.raise_for_status()
+            with dest.open("wb") as fp:
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        fp.write(chunk)
 
 
 async def _send_file_behind_link(url: str, file_name: str) -> Any:
@@ -104,7 +102,7 @@ async def _send_file_behind_link(url: str, file_name: str) -> Any:
     )
 
     dest = _scratch_dir() / name
-    _download_to_path(url, dest)
+    await _download_to_path(url, dest)
 
     from khl import Bot, MessageTypes
 

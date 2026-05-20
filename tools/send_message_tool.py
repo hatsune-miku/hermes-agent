@@ -526,30 +526,49 @@ async def _send_via_adapter(
         except Exception:
             adapter = None
         if adapter is not None:
-            metadata = {"thread_id": thread_id} if thread_id else None
-            text_message_id = None
-            if chunk and chunk.strip():
-                try:
-                    result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    return {"error": f"Plugin platform send failed: {e}"}
-                if not result.success:
-                    return {"error": f"Adapter send failed: {result.error}"}
-                text_message_id = result.message_id
+            async def _send_on_adapter_loop():
+                metadata = {"thread_id": thread_id} if thread_id else None
+                text_message_id = None
+                if chunk and chunk.strip():
+                    try:
+                        result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        return {"error": f"Plugin platform send failed: {e}"}
+                    if not result.success:
+                        return {"error": f"Adapter send failed: {result.error}"}
+                    text_message_id = result.message_id
 
-            media_error = await _dispatch_media_via_adapter(
-                adapter,
-                chat_id,
-                media_files or [],
-                metadata=metadata,
-                force_document=force_document,
-            )
-            if media_error is not None:
-                return media_error
+                media_error = await _dispatch_media_via_adapter(
+                    adapter,
+                    chat_id,
+                    media_files or [],
+                    metadata=metadata,
+                    force_document=force_document,
+                )
+                if media_error is not None:
+                    return media_error
 
-            return {"success": True, "message_id": text_message_id}
+                return {"success": True, "message_id": text_message_id}
+
+            gateway_loop = getattr(runner, "_gateway_loop", None)
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if (
+                gateway_loop is not None
+                and gateway_loop is not current_loop
+                and not gateway_loop.is_closed()
+                and gateway_loop.is_running()
+            ):
+                future = asyncio.run_coroutine_threadsafe(
+                    _send_on_adapter_loop(), gateway_loop
+                )
+                return await asyncio.wrap_future(future)
+
+            return await _send_on_adapter_loop()
 
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     entry = None
