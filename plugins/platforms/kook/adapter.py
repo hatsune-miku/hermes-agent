@@ -349,15 +349,10 @@ class KookAdapter(BasePlatformAdapter):
                 getattr(channel, "id", None) or getattr(msg, "target_id", "")
             )
             if not mentioned:
-                stripped_text = text.strip().lower()
-                is_reset_command = stripped_text.startswith('/new') or stripped_text.startswith('/reset')
-                if not is_reset_command:
-                    self._store_group_history(
-                        channel_id, author, text, getattr(msg, "msg_id", None)
-                    )
-                    return
-                # Reset commands (/new /reset) get processed even when not mentioned
-                # to avoid wasting model tokens on handling them in the next turn
+                self._store_group_history(
+                    channel_id, author, text, getattr(msg, "msg_id", None)
+                )
+                return
             text = self._with_ambient_history(channel_id, text)
 
         if is_dm:
