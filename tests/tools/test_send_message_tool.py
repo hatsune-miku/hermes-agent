@@ -2231,6 +2231,236 @@ class TestSendViaAdapterStandaloneFallback:
         assert result["extra_field"] == "preserved"
 
 
+class TestSendViaAdapterLiveMediaDispatch:
+    """When the gateway runner is in-process, ``_send_via_adapter`` must
+    dispatch ``media_files`` to the adapter's per-type methods
+    (``send_image_file`` / ``send_voice`` / ``send_video`` / ``send_document``)
+    so plugin platforms get parity with built-in MEDIA delivery."""
+
+    @staticmethod
+    def _adapter_with_calls():
+        from gateway.config import Platform
+        from gateway.platforms.base import SendResult
+
+        calls = []
+
+        def make_method(name):
+            async def method(**kwargs):
+                calls.append((name, kwargs))
+                return SendResult(success=True, message_id=f"{name}-id")
+            return method
+
+        adapter = SimpleNamespace(
+            platform=Platform("kook"),
+            send=make_method("send"),
+            send_image_file=make_method("send_image_file"),
+            send_voice=make_method("send_voice"),
+            send_video=make_method("send_video"),
+            send_document=make_method("send_document"),
+        )
+        return adapter, calls
+
+    @pytest.mark.asyncio
+    async def test_live_adapter_dispatches_image_voice_video_document(self, monkeypatch):
+        from tools.send_message_tool import _send_via_adapter
+
+        adapter, calls = self._adapter_with_calls()
+        runner = SimpleNamespace(adapters={_FakePlatform("kook"): adapter})
+        runner.adapters = {}
+        # Use a key compatible with `runner.adapters.get(platform)`:
+        platform = _FakePlatform("kook")
+        runner.adapters[platform] = adapter
+        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+
+        result = await _send_via_adapter(
+            platform,
+            SimpleNamespace(extra={}),
+            "chat-9",
+            "see attached",
+            media_files=[
+                ("/tmp/pic.png", False),
+                ("/tmp/voice.ogg", True),
+                ("/tmp/clip.mp4", False),
+                ("/tmp/notes.pdf", False),
+            ],
+        )
+
+        assert result == {"success": True, "message_id": "send-id"}
+        names = [name for name, _ in calls]
+        assert names == [
+            "send",
+            "send_image_file",
+            "send_voice",
+            "send_video",
+            "send_document",
+        ]
+        # Each method received the right file path
+        method_to_path = {
+            "send_image_file": "image_path",
+            "send_voice": "audio_path",
+            "send_video": "video_path",
+            "send_document": "file_path",
+        }
+        expected_paths = {
+            "send_image_file": "/tmp/pic.png",
+            "send_voice": "/tmp/voice.ogg",
+            "send_video": "/tmp/clip.mp4",
+            "send_document": "/tmp/notes.pdf",
+        }
+        for name, kwargs in calls[1:]:
+            assert kwargs[method_to_path[name]] == expected_paths[name]
+
+    @pytest.mark.asyncio
+    async def test_live_adapter_force_document_routes_images_to_send_document(self, monkeypatch):
+        from tools.send_message_tool import _send_via_adapter
+
+        adapter, calls = self._adapter_with_calls()
+        platform = _FakePlatform("kook")
+        runner = SimpleNamespace(adapters={platform: adapter})
+        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+
+        result = await _send_via_adapter(
+            platform,
+            SimpleNamespace(extra={}),
+            "chat-9",
+            "",
+            media_files=[("/tmp/pic.png", False)],
+            force_document=True,
+        )
+
+        assert result["success"] is True
+        # Empty text means send() should not be called, only send_document
+        names = [name for name, _ in calls]
+        assert names == ["send_document"]
+
+    @pytest.mark.asyncio
+    async def test_live_adapter_media_failure_aborts_with_error(self, monkeypatch):
+        from gateway.platforms.base import SendResult
+        from tools.send_message_tool import _send_via_adapter
+
+        calls = []
+
+        async def send(**kwargs):
+            calls.append(("send", kwargs))
+            return SendResult(success=True, message_id="text-id")
+
+        async def send_image_file(**kwargs):
+            return SendResult(success=False, error="upload exploded")
+
+        from gateway.config import Platform
+
+        adapter = SimpleNamespace(
+            platform=Platform("kook"),
+            send=send,
+            send_image_file=send_image_file,
+        )
+        platform = _FakePlatform("kook")
+        runner = SimpleNamespace(adapters={platform: adapter})
+        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+
+        result = await _send_via_adapter(
+            platform,
+            SimpleNamespace(extra={}),
+            "chat-9",
+            "hi",
+            media_files=[("/tmp/pic.png", False)],
+        )
+
+        assert "error" in result
+        assert "upload exploded" in result["error"]
+
+
+class TestSendToPlatformPluginBranch:
+    """``_send_to_platform`` must hand plugin platforms over to
+    ``_send_via_adapter`` with ``media_files`` only attached to the final chunk
+    — mirroring how Discord / Telegram fast-paths schedule media delivery."""
+
+    @staticmethod
+    def _register_kook_entry(max_message_length=0):
+        from gateway.platform_registry import PlatformEntry, platform_registry
+
+        entry = PlatformEntry(
+            name="kook",
+            label="KOOK",
+            adapter_factory=lambda cfg: None,
+            check_fn=lambda: True,
+            source="plugin",
+            max_message_length=max_message_length,
+        )
+        platform_registry.register(entry)
+        return entry
+
+    @pytest.mark.asyncio
+    async def test_plugin_platform_passes_media_on_last_chunk_only(self, monkeypatch):
+        from tools import send_message_tool
+        from gateway.platform_registry import platform_registry
+
+        # Force chunking by giving kook a tiny max_message_length
+        self._register_kook_entry(max_message_length=10)
+
+        calls = []
+
+        async def fake_send_via_adapter(platform, pconfig, chat_id, chunk, **kwargs):
+            calls.append({"chunk": chunk, "kwargs": kwargs})
+            return {"success": True, "message_id": f"id-{len(calls)}"}
+
+        monkeypatch.setattr(send_message_tool, "_send_via_adapter", fake_send_via_adapter)
+
+        from gateway.config import Platform
+        platform = Platform("kook")
+
+        try:
+            result = await send_message_tool._send_to_platform(
+                platform,
+                SimpleNamespace(extra={}, token=""),
+                "chat-1",
+                "abcdefghij abcdefghij abcdefghij",  # ~32 chars → 4 chunks at limit 10
+                media_files=[("/tmp/img.png", False)],
+            )
+        finally:
+            platform_registry.unregister("kook")
+
+        assert result["success"] is True
+        assert len(calls) >= 2
+        # Every chunk except the last passes media_files=[]
+        for entry in calls[:-1]:
+            assert entry["kwargs"]["media_files"] == []
+        assert calls[-1]["kwargs"]["media_files"] == [("/tmp/img.png", False)]
+
+    @pytest.mark.asyncio
+    async def test_plugin_platform_media_only_message_still_dispatched(self, monkeypatch):
+        from tools import send_message_tool
+        from gateway.platform_registry import platform_registry
+
+        self._register_kook_entry()
+
+        calls = []
+
+        async def fake_send_via_adapter(platform, pconfig, chat_id, chunk, **kwargs):
+            calls.append({"chunk": chunk, "kwargs": kwargs})
+            return {"success": True, "message_id": "only"}
+
+        monkeypatch.setattr(send_message_tool, "_send_via_adapter", fake_send_via_adapter)
+
+        from gateway.config import Platform
+        platform = Platform("kook")
+
+        try:
+            result = await send_message_tool._send_to_platform(
+                platform,
+                SimpleNamespace(extra={}, token=""),
+                "chat-1",
+                "",
+                media_files=[("/tmp/img.png", False)],
+            )
+        finally:
+            platform_registry.unregister("kook")
+
+        assert result["success"] is True
+        assert len(calls) == 1
+        assert calls[0]["kwargs"]["media_files"] == [("/tmp/img.png", False)]
+
+
 # ---------------------------------------------------------------------------
 # _check_send_message — availability gating
 # ---------------------------------------------------------------------------

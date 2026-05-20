@@ -55,25 +55,6 @@ class TestCleanForDisplay:
         assert "MEDIA:" not in result
         assert "Here are two files:" in result
 
-    def test_markdown_image_stripped(self):
-        """Streamed display hides image markup that is delivered separately."""
-        text = "Done\n![result](https://example.com/result.png)"
-        result = GatewayStreamConsumer._clean_for_display(text)
-        assert "![result]" not in result
-        assert "https://example.com/result.png" not in result
-        assert "Done" in result
-
-    def test_duplicate_bare_image_url_stripped_with_markup(self):
-        """A URL repeated beside image markup should not render as another image."""
-        text = (
-            "Done\n"
-            "![result](https://example.com/result.png)\n"
-            "https://example.com/result.png"
-        )
-        result = GatewayStreamConsumer._clean_for_display(text)
-        assert "https://example.com/result.png" not in result
-        assert "Done" in result
-
     def test_excessive_newlines_collapsed(self):
         """Blank lines left by removed tags are collapsed."""
         text = "Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"

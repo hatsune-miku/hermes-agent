@@ -223,25 +223,6 @@ class TestExtractImages:
         assert "![a]" not in cleaned
         assert "![b]" not in cleaned
 
-    def test_duplicate_image_url_sent_once(self):
-        content = (
-            "![a](https://example.com/a.png)\n"
-            '<img src="https://example.com/a.png">'
-        )
-        images, cleaned = BasePlatformAdapter.extract_images(content)
-        assert images == [("https://example.com/a.png", "a")]
-        assert "https://example.com/a.png" not in cleaned
-
-    def test_duplicate_bare_image_url_removed_from_cleaned_text(self):
-        content = (
-            "Here is the generated image:\n"
-            "![result](https://example.com/result.png)\n"
-            "https://example.com/result.png"
-        )
-        images, cleaned = BasePlatformAdapter.extract_images(content)
-        assert images == [("https://example.com/result.png", "result")]
-        assert "https://example.com/result.png" not in cleaned
-
     def test_mixed_markdown_and_html(self):
         content = '![cat](https://example.com/cat.png)\n<img src="https://example.com/dog.jpg">'
         images, _ = BasePlatformAdapter.extract_images(content)

@@ -426,6 +426,72 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
+def _is_plugin_platform(platform) -> bool:
+    """Return True when ``platform`` was registered via the plugin system."""
+    try:
+        from gateway.platform_registry import platform_registry
+        name = platform.value if hasattr(platform, "value") else str(platform)
+        entry = platform_registry.get(name)
+    except Exception:
+        return False
+    return bool(entry and getattr(entry, "source", "") == "plugin")
+
+
+async def _dispatch_media_via_adapter(
+    adapter,
+    chat_id: str,
+    media_files,
+    *,
+    metadata,
+    force_document: bool,
+) -> dict | None:
+    """Send each MEDIA: file through the most specific adapter method.
+
+    Mirrors the per-file routing in ``BasePlatformAdapter._process_message``
+    so plugin platforms get image / voice / video / document dispatch instead
+    of the silent drop the live ``_send_via_adapter`` path used to do.
+    Returns an error dict on the first failure, or ``None`` on success.
+    """
+    if not media_files:
+        return None
+
+    from gateway.platforms.base import should_send_media_as_audio
+
+    platform_obj = getattr(adapter, "platform", None)
+
+    for media_path, is_voice in media_files:
+        ext = os.path.splitext(media_path)[1].lower()
+        try:
+            if ext in _IMAGE_EXTS and not force_document:
+                send_result = await adapter.send_image_file(
+                    chat_id=chat_id, image_path=media_path, metadata=metadata
+                )
+            elif ext in _VIDEO_EXTS and not force_document:
+                send_result = await adapter.send_video(
+                    chat_id=chat_id, video_path=media_path, metadata=metadata
+                )
+            elif should_send_media_as_audio(platform_obj, ext, is_voice=is_voice) and not force_document:
+                send_result = await adapter.send_voice(
+                    chat_id=chat_id, audio_path=media_path, metadata=metadata
+                )
+            else:
+                send_result = await adapter.send_document(
+                    chat_id=chat_id, file_path=media_path, metadata=metadata
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return {"error": f"Adapter media send failed for {media_path}: {e}"}
+        if not getattr(send_result, "success", False):
+            return {
+                "error": (
+                    f"Adapter media send failed for {media_path}: "
+                    f"{getattr(send_result, 'error', 'unknown')}"
+                )
+            }
+    return None
+
+
 async def _send_via_adapter(
     platform,
     pconfig,
@@ -460,16 +526,30 @@ async def _send_via_adapter(
         except Exception:
             adapter = None
         if adapter is not None:
-            try:
-                metadata = {"thread_id": thread_id} if thread_id else None
-                result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                return {"error": f"Plugin platform send failed: {e}"}
-            if result.success:
-                return {"success": True, "message_id": result.message_id}
-            return {"error": f"Adapter send failed: {result.error}"}
+            metadata = {"thread_id": thread_id} if thread_id else None
+            text_message_id = None
+            if chunk and chunk.strip():
+                try:
+                    result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    return {"error": f"Plugin platform send failed: {e}"}
+                if not result.success:
+                    return {"error": f"Adapter send failed: {result.error}"}
+                text_message_id = result.message_id
+
+            media_error = await _dispatch_media_via_adapter(
+                adapter,
+                chat_id,
+                media_files or [],
+                metadata=metadata,
+                force_document=force_document,
+            )
+            if media_error is not None:
+                return media_error
+
+            return {"success": True, "message_id": text_message_id}
 
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     entry = None
@@ -684,6 +764,28 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 return result
             last_result = result
         return last_result
+
+    # --- Plugin platforms: route text + media through the live adapter ---
+    if _is_plugin_platform(platform):
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            chunk_media = media_files if is_last else []
+            if not chunk.strip() and not chunk_media:
+                continue
+            result = await _send_via_adapter(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+                media_files=chunk_media,
+                force_document=force_document,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result or {"success": True}
 
     # --- Non-media platforms ---
     if media_files and not message.strip():

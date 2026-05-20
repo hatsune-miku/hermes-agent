@@ -1963,21 +1963,6 @@ class BasePlatformAdapter(ABC):
             url = match.group(1)
             images.append((url, ""))
 
-        if images:
-            # A model may repeat the same generated image as both markdown and
-            # HTML, or include a URL-shaped alt text. Send each URL once and
-            # avoid turning URL captions into a second rendered image message.
-            unique_images = []
-            seen_urls = set()
-            for url, alt_text in images:
-                if url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                if isinstance(alt_text, str) and re.search(r"https?://", alt_text):
-                    alt_text = ""
-                unique_images.append((url, alt_text))
-            images = unique_images
-        
         # Remove only the matched image tags from content (not all markdown images)
         if images:
             extracted_urls = {url for url, _ in images}
@@ -1986,15 +1971,6 @@ class BasePlatformAdapter(ABC):
                 return '' if url in extracted_urls else match.group(0)
             cleaned = re.sub(md_pattern, _remove_if_extracted, cleaned)
             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
-            for url in extracted_urls:
-                # Remove duplicate bare occurrences of an image URL that has
-                # already been routed to native media delivery. Do not touch
-                # normal markdown links like [source](url).
-                cleaned = re.sub(
-                    rf'(?<![\(<="\']){re.escape(url)}(?=[\s\).,;:!?]*($|\s))',
-                    '',
-                    cleaned,
-                )
             # Clean up leftover blank lines
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         

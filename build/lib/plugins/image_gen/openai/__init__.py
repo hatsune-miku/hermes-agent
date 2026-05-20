@@ -21,6 +21,11 @@ used.
 
 Credentials are read from ``IMAGE_GEN_OPENAI_API_KEY`` so image generation can
 use a dedicated OpenAI-compatible key independent from the chat/model provider.
+For image-conditioned requests, ``IMAGE_GEN_OPENAI_RESPONSES_MODEL`` can
+override the Responses API host model. When a custom base URL is configured,
+image-conditioned requests use multimodal ``/chat/completions`` because some
+OpenAI-compatible gateways expose image editing through chat messages instead
+of the Responses API.
 
 Selection precedence (first hit wins):
 
@@ -32,9 +37,15 @@ Selection precedence (first hit wins):
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import mimetypes
 import os
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -59,6 +70,14 @@ logger = logging.getLogger(__name__)
 API_MODEL = "gpt-image-2"
 API_KEY_ENV = "IMAGE_GEN_OPENAI_API_KEY"
 BASE_URL_ENV = "IMAGE_GEN_OPENAI_BASEURL"
+RESPONSES_MODEL_ENV = "IMAGE_GEN_OPENAI_RESPONSES_MODEL"
+RESPONSES_MODEL = "gpt-5.5"
+MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024
+VALID_IMAGE_ACTIONS = {"auto", "generate", "edit"}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+)
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "gpt-image-2-low": {
@@ -88,6 +107,12 @@ _SIZES = {
     "square": "1024x1024",
     "portrait": "1024x1536",
 }
+
+_DATA_URL_RE = re.compile(
+    r"data:image/([a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)"
+)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_URL_RE = re.compile(r"https?://[^\s)\"']+")
 
 
 def _load_openai_config() -> Dict[str, Any]:
@@ -133,21 +158,345 @@ def _resolve_base_url() -> Optional[str]:
     if not isinstance(base_url, str):
         return None
     base_url = base_url.strip()
-    print("image_gen base url:", base_url)
     return base_url or None
 
 
-def _build_openai_client(openai_module: Any) -> Any:
+def _resolve_responses_model() -> str:
+    """Return the host model for Responses API image-conditioned requests."""
+    override = os.environ.get(RESPONSES_MODEL_ENV)
+    if isinstance(override, str) and override.strip():
+        return override.strip()
+    return RESPONSES_MODEL
+
+
+def _build_openai_client(openai_module: Any, base_url: Optional[str] = None) -> Any:
     """Build an OpenAI client, honoring the image-gen-specific base URL."""
     api_key = os.environ.get(API_KEY_ENV)
-    print("image_gen base url:", api_key)
-    client_kwargs: Dict[str, Any] = {"api_key": api_key}
-    base_url = _resolve_base_url()
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "default_headers": {"User-Agent": USER_AGENT},
+    }
+    if base_url is None:
+        base_url = _resolve_base_url()
     if base_url:
         client_kwargs["base_url"] = base_url
 
-    print("full args passed to openai:", client_kwargs)
     return openai_module.OpenAI(**client_kwargs)
+
+
+def _coerce_string_list(value: Any) -> List[str]:
+    """Accept either a single string or list-like input and return clean strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: List[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _data_url_for_image_path(raw_path: str) -> str:
+    """Return a data URL for a local image file path."""
+    path = Path(raw_path).expanduser()
+    if not path.is_file():
+        raise ValueError(
+            f"Input image path does not exist or is not a file: {raw_path}"
+        )
+
+    size = path.stat().st_size
+    if size > MAX_INPUT_IMAGE_BYTES:
+        limit_mb = MAX_INPUT_IMAGE_BYTES // (1024 * 1024)
+        raise ValueError(f"Input image is too large: {raw_path} exceeds {limit_mb}MB")
+
+    mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    if not mime_type.startswith("image/"):
+        raise ValueError(f"Input file is not recognized as an image: {raw_path}")
+
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _data_url_for_remote_image(image_url: str) -> str:
+    """Download a remote image URL and return a data URL for chat-completions."""
+    import requests
+
+    response = requests.get(
+        image_url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=30,
+    )
+    response.raise_for_status()
+    image_bytes = response.content
+
+    if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+        limit_mb = MAX_INPUT_IMAGE_BYTES // (1024 * 1024)
+        raise ValueError(f"Input image is too large: {image_url} exceeds {limit_mb}MB")
+
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    if not content_type.startswith("image/"):
+        content_type = mimetypes.guess_type(urlparse(image_url).path)[0] or ""
+    if not content_type.startswith("image/"):
+        raise ValueError(f"Remote URL did not return an image: {image_url}")
+
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
+def _validate_image_url(value: str) -> str:
+    """Return a supported image URL/data URL or raise a clear error."""
+    if value.startswith("data:image/"):
+        return value
+
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return value
+
+    raise ValueError(
+        "Input image URLs must be fully qualified http(s) URLs or data:image/* URLs"
+    )
+
+
+def _build_input_image_content(
+    *,
+    prompt: str,
+    image_urls: Any = None,
+    image_paths: Any = None,
+    file_ids: Any = None,
+) -> List[Dict[str, Any]]:
+    """Build Responses API message content with text plus input images."""
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+
+    for image_url in _coerce_string_list(image_urls):
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": _validate_image_url(image_url),
+            }
+        )
+
+    for image_path in _coerce_string_list(image_paths):
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": _data_url_for_image_path(image_path),
+            }
+        )
+
+    for file_id in _coerce_string_list(file_ids):
+        content.append({"type": "input_image", "file_id": file_id})
+
+    return content
+
+
+def _input_image_count(content: List[Dict[str, Any]]) -> int:
+    return sum(1 for item in content if item.get("type") == "input_image")
+
+
+def _build_chat_completion_messages(
+    input_content: List[Dict[str, Any]],
+    *,
+    inline_remote_images: bool = False,
+) -> List[Dict[str, Any]]:
+    """Build the multimodal Chat Completions body used by custom gateways."""
+    content: List[Dict[str, Any]] = []
+    for item in input_content:
+        item_type = item.get("type")
+        if item_type == "input_text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                content.append({"type": "text", "text": text})
+            continue
+
+        if item_type != "input_image":
+            continue
+
+        image_url = item.get("image_url")
+        if isinstance(image_url, str) and image_url:
+            if inline_remote_images and not image_url.startswith("data:image/"):
+                image_url = _data_url_for_remote_image(image_url)
+            content.append({"type": "image_url", "image_url": {"url": image_url}})
+            continue
+
+        file_id = item.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            raise ValueError(
+                "file_ids are not supported by custom chat-completions image "
+                "generation; use image_urls or image_paths instead"
+            )
+
+    return [{"role": "user", "content": content}]
+
+
+def _image_extension_from_mime_subtype(subtype: str) -> str:
+    subtype = subtype.lower().split("+", 1)[0]
+    if subtype in {"jpeg", "jpg"}:
+        return "jpg"
+    if subtype in {"png", "webp", "gif"}:
+        return subtype
+    return "png"
+
+
+def _save_data_url(data_url: str, *, prefix: str) -> Optional[str]:
+    match = _DATA_URL_RE.search(data_url)
+    if not match:
+        return None
+    extension = _image_extension_from_mime_subtype(match.group(1))
+    b64 = "".join(match.group(2).split())
+    return str(save_b64_image(b64, prefix=prefix, extension=extension))
+
+
+def _extract_image_reference(value: Any, *, prefix: str) -> Optional[str]:
+    """Find an image URL or b64 payload in an OpenAI-compatible response."""
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+
+        saved = _save_data_url(stripped, prefix=prefix)
+        if saved:
+            return saved
+
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None:
+            found = _extract_image_reference(parsed, prefix=prefix)
+            if found:
+                return found
+
+        markdown_match = _MARKDOWN_IMAGE_RE.search(stripped)
+        if markdown_match:
+            found = _extract_image_reference(markdown_match.group(1), prefix=prefix)
+            if found:
+                return found
+
+        if stripped.startswith(("http://", "https://")):
+            return stripped
+
+        url_match = _URL_RE.search(stripped)
+        if url_match:
+            return url_match.group(0).rstrip(".,;")
+
+        return None
+
+    if isinstance(value, dict):
+        for key in ("b64_json", "base64", "image_base64"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return str(save_b64_image(raw.strip(), prefix=prefix))
+
+        for key in ("image", "url", "image_url", "output", "result"):
+            found = _extract_image_reference(value.get(key), prefix=prefix)
+            if found:
+                return found
+
+        for nested in value.values():
+            found = _extract_image_reference(nested, prefix=prefix)
+            if found:
+                return found
+        return None
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            found = _extract_image_reference(item, prefix=prefix)
+            if found:
+                return found
+        return None
+
+    dumped = getattr(value, "model_dump", None)
+    if callable(dumped):
+        try:
+            found = _extract_image_reference(dumped(), prefix=prefix)
+            if found:
+                return found
+        except Exception:
+            logger.debug("Could not model_dump chat completion response", exc_info=True)
+
+    return None
+
+
+def _extract_chat_completion_image(
+    response: Any,
+    *,
+    prefix: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(image_ref, revised_prompt)`` from a chat-completions result."""
+    for choice in _field(response, "choices") or []:
+        message = _field(choice, "message")
+        if message is None:
+            continue
+
+        revised = _field(message, "revised_prompt")
+        image_ref = _extract_image_reference(_field(message, "content"), prefix=prefix)
+        if image_ref:
+            return image_ref, revised if isinstance(revised, str) else None
+
+        image_ref = _extract_image_reference(message, prefix=prefix)
+        if image_ref:
+            return image_ref, revised if isinstance(revised, str) else None
+
+    return _extract_image_reference(response, prefix=prefix), None
+
+
+def _create_chat_completion_image(
+    client: Any,
+    *,
+    input_content: List[Dict[str, Any]],
+) -> Any:
+    return client.chat.completions.create(
+        model=API_MODEL,
+        messages=_build_chat_completion_messages(
+            input_content,
+            inline_remote_images=True,
+        ),
+        stream=False,
+    )
+
+
+def _field(obj: Any, name: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _extract_response_image(response: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(b64_image, revised_prompt)`` from a Responses API result."""
+    for item in _field(response, "output") or []:
+        if _field(item, "type") != "image_generation_call":
+            continue
+        result = _field(item, "result")
+        if isinstance(result, str) and result:
+            revised = _field(item, "revised_prompt")
+            return result, revised if isinstance(revised, str) else None
+    return None, None
+
+
+def _create_image_response(
+    client: Any,
+    *,
+    model: str,
+    input_content: List[Dict[str, Any]],
+    tool: Dict[str, Any],
+) -> Any:
+    return client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": input_content,
+            }
+        ],
+        tools=[tool],
+        tool_choice={"type": "image_generation"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +598,41 @@ class OpenAIImageGenProvider(ImageGenProvider):
         tier_id, meta = _resolve_model()
         size = _SIZES.get(aspect, _SIZES["square"])
 
+        action = kwargs.get("action")
+        if isinstance(action, str):
+            action = action.strip().lower() or "auto"
+        else:
+            action = "auto"
+        if action not in VALID_IMAGE_ACTIONS:
+            return error_response(
+                error="action must be one of: auto, generate, edit",
+                error_type="invalid_argument",
+                provider="openai",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        try:
+            input_content = _build_input_image_content(
+                prompt=prompt,
+                image_urls=kwargs.get("image_urls") or kwargs.get("image_url"),
+                image_paths=kwargs.get("image_paths") or kwargs.get("image_path"),
+                file_ids=kwargs.get("file_ids") or kwargs.get("file_id"),
+            )
+        except ValueError as exc:
+            return error_response(
+                error=str(exc),
+                error_type="invalid_argument",
+                provider="openai",
+                model=tier_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        input_image_count = _input_image_count(input_content)
+        has_input_images = input_image_count > 0
+
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
         payload: Dict[str, Any] = {
@@ -260,9 +644,107 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = _build_openai_client(openai)
+            base_url = _resolve_base_url()
+            client = _build_openai_client(openai, base_url=base_url)
 
-            print("creating image with payload:", payload)
+            if has_input_images:
+                if base_url:
+                    response = _create_chat_completion_image(
+                        client,
+                        input_content=input_content,
+                    )
+                    image_ref, revised_prompt = _extract_chat_completion_image(
+                        response,
+                        prefix=f"openai_{tier_id}",
+                    )
+                    if not image_ref:
+                        return error_response(
+                            error=(
+                                "OpenAI chat completion response contained no "
+                                "image URL or base64 image"
+                            ),
+                            error_type="empty_response",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+
+                    extra: Dict[str, Any] = {
+                        "size": size,
+                        "quality": meta["quality"],
+                        "action": action,
+                        "input_image_count": input_image_count,
+                    }
+                    if revised_prompt:
+                        extra["revised_prompt"] = revised_prompt
+
+                    return success_response(
+                        image=image_ref,
+                        model=tier_id,
+                        prompt=prompt,
+                        aspect_ratio=aspect,
+                        provider="openai",
+                        extra=extra,
+                    )
+                else:
+                    tool: Dict[str, Any] = {
+                        "type": "image_generation",
+                        "model": API_MODEL,
+                        "size": size,
+                        "quality": meta["quality"],
+                        "output_format": "png",
+                        "action": action,
+                    }
+                    response = _create_image_response(
+                        client,
+                        model=_resolve_responses_model(),
+                        input_content=input_content,
+                        tool=tool,
+                    )
+                    b64, revised_prompt = _extract_response_image(response)
+                    if not b64:
+                        return error_response(
+                            error=(
+                                "OpenAI response contained no "
+                                "image_generation_call result"
+                            ),
+                            error_type="empty_response",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+                    try:
+                        saved_path = save_b64_image(b64, prefix=f"openai_{tier_id}")
+                    except Exception as exc:
+                        return error_response(
+                            error=f"Could not save image to cache: {exc}",
+                            error_type="io_error",
+                            provider="openai",
+                            model=tier_id,
+                            prompt=prompt,
+                            aspect_ratio=aspect,
+                        )
+
+                    extra: Dict[str, Any] = {
+                        "size": size,
+                        "quality": meta["quality"],
+                        "action": action,
+                        "input_image_count": input_image_count,
+                    }
+                    if revised_prompt:
+                        extra["revised_prompt"] = revised_prompt
+
+                    return success_response(
+                        image=str(saved_path),
+                        model=tier_id,
+                        prompt=prompt,
+                        aspect_ratio=aspect,
+                        provider="openai",
+                        extra=extra,
+                    )
+
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
@@ -319,6 +801,9 @@ class OpenAIImageGenProvider(ImageGenProvider):
             )
 
         extra: Dict[str, Any] = {"size": size, "quality": meta["quality"]}
+        if has_input_images:
+            extra["action"] = action
+            extra["input_image_count"] = input_image_count
         if revised_prompt:
             extra["revised_prompt"] = revised_prompt
 

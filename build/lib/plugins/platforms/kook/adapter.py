@@ -1,42 +1,64 @@
 import asyncio
 import logging
 import os
+import tempfile
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from gateway.config import Platform
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_LENGTH = 2000
+MAX_AMBIENT_HISTORY = 20
+
 
 def _khl():
-    from khl import Bot, ChannelPrivacyTypes, MessageTypes
+    from khl import Bot, ChannelPrivacyTypes, Message, MessageTypes
 
-    return Bot, ChannelPrivacyTypes, MessageTypes
+    return Bot, ChannelPrivacyTypes, Message, MessageTypes
 
 
 class KookAdapter(BasePlatformAdapter):
     def __init__(self, config, **kwargs):
         super().__init__(config=config, platform=Platform("kook"))
         extra = getattr(config, "extra", {}) or {}
-        self.token = os.getenv("KOOK_TOKEN") or extra.get("token") or getattr(config, "token", "") or ""
-        self.max_message_length = int(extra.get("max_message_length") or MAX_MESSAGE_LENGTH)
+        self.token = (
+            os.getenv("KOOK_TOKEN")
+            or extra.get("token")
+            or getattr(config, "token", "")
+            or ""
+        )
+        self.max_message_length = int(
+            extra.get("max_message_length") or MAX_MESSAGE_LENGTH
+        )
         self._bot = None
         self._bot_task: Optional[asyncio.Task] = None
         self._bot_user_id: Optional[str] = None
         self._dm_chat_ids: set[str] = set()
+        self._group_history = defaultdict(lambda: deque(maxlen=MAX_AMBIENT_HISTORY))
 
     async def connect(self) -> bool:
         try:
-            Bot, _, _ = _khl()
+            Bot, _, _, _ = _khl()
         except Exception:
-            self._set_fatal_error("missing_dependency", "khl.py is not installed", retryable=False)
+            self._set_fatal_error(
+                "missing_dependency", "khl.py is not installed", retryable=False
+            )
             return False
         if not self.token:
-            self._set_fatal_error("missing_token", "KOOK_TOKEN is required", retryable=False)
+            self._set_fatal_error(
+                "missing_token", "KOOK_TOKEN is required", retryable=False
+            )
             return False
 
         self._bot = Bot(token=self.token)
@@ -79,12 +101,42 @@ class KookAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="KOOK bot is not connected")
         try:
             target = await self._resolve_send_target(chat_id, metadata)
-            _, _, MessageTypes = _khl()
+            _, _, _, MessageTypes = _khl()
             message = await target.send(content, type=MessageTypes.KMD)
-            return SendResult(success=True, message_id=self._extract_message_id(message))
+            return SendResult(
+                success=True, message_id=self._extract_message_id(message)
+            )
         except Exception as exc:
             logger.warning("KOOK: failed to send message to %s: %s", chat_id, exc)
             return SendResult(success=False, error=str(exc))
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        if not self._bot:
+            return SendResult(success=False, error="KOOK bot is not connected")
+        try:
+            from khl import api
+
+            request = (
+                api.DirectMessage.update(msg_id=message_id, content=content)
+                if chat_id in self._dm_chat_ids
+                else api.Message.update(msg_id=message_id, content=content)
+            )
+            await self._bot.client.gate.exec_req(request)
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            error = str(exc)
+            retryable = _is_retryable_kook_edit_error(error)
+            logger.warning("KOOK: failed to edit message %s: %s", message_id, exc)
+            return SendResult(
+                success=False, message_id=message_id, error=error, retryable=retryable
+            )
 
     async def send_image(
         self,
@@ -96,16 +148,40 @@ class KookAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._bot:
             return SendResult(success=False, error="KOOK bot is not connected")
+        # External http(s) URLs must be downloaded and re-uploaded through the
+        # KOOK asset API; sending a foreign URL directly fails.  Only URLs on
+        # the KOOK CDN (img.kookapp.cn) can be forwarded as-is.
+        if (
+            image_url.startswith(("http://", "https://"))
+            and "img.kookapp.cn" not in image_url
+        ):
+            try:
+                dest = _scratch_dir() / _filename_from_url(image_url)
+                _download_to_path(image_url, dest)
+            except Exception as exc:
+                logger.warning(
+                    "KOOK: failed to download external image %s: %s", image_url, exc
+                )
+                return SendResult(success=False, error=str(exc))
+            return await self.send_image_file(
+                chat_id=chat_id,
+                image_path=str(dest),
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
         try:
             target = await self._resolve_send_target(chat_id, metadata)
-            _, _, MessageTypes = _khl()
+            _, _, _, MessageTypes = _khl()
             asset_url = image_url
             if not image_url.startswith(("http://", "https://")):
                 asset_url = await self._bot.client.create_asset(Path(image_url))
             message = await target.send(asset_url, type=MessageTypes.IMG)
             if caption:
                 await target.send(caption, type=MessageTypes.KMD)
-            return SendResult(success=True, message_id=self._extract_message_id(message))
+            return SendResult(
+                success=True, message_id=self._extract_message_id(message)
+            )
         except Exception as exc:
             logger.warning("KOOK: failed to send image to %s: %s", chat_id, exc)
             return SendResult(success=False, error=str(exc))
@@ -133,18 +209,21 @@ class KookAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
         if not self._bot:
             return SendResult(success=False, error="KOOK bot is not connected")
         try:
             target = await self._resolve_send_target(chat_id, kwargs.get("metadata"))
-            _, _, MessageTypes = _khl()
+            _, _, _, MessageTypes = _khl()
             asset_url = await self._bot.client.create_asset(Path(file_path))
             message = await target.send(asset_url, type=MessageTypes.FILE)
             if caption:
                 await target.send(caption, type=MessageTypes.KMD)
-            return SendResult(success=True, message_id=self._extract_message_id(message))
+            return SendResult(
+                success=True, message_id=self._extract_message_id(message)
+            )
         except Exception as exc:
             logger.warning("KOOK: failed to send document to %s: %s", chat_id, exc)
             return SendResult(success=False, error=str(exc))
@@ -159,13 +238,19 @@ class KookAdapter(BasePlatformAdapter):
             return {"name": chat_id, "type": "channel", "chat_id": chat_id}
         try:
             channel = await self._bot.client.fetch_public_channel(chat_id)
-            return {"name": getattr(channel, "name", chat_id), "type": "channel", "chat_id": chat_id}
+            return {
+                "name": getattr(channel, "name", chat_id),
+                "type": "channel",
+                "chat_id": chat_id,
+            }
         except Exception:
             return {"name": chat_id, "type": "channel", "chat_id": chat_id}
 
     def _register_handlers(self) -> None:
+        _, _, Message, _ = _khl()
+
         @self._bot.on_message()
-        async def _handle_message(msg):
+        async def _handle_message(msg: Message) -> None:
             await self._on_kook_message(msg)
 
     async def _run_bot(self) -> None:
@@ -182,7 +267,9 @@ class KookAdapter(BasePlatformAdapter):
         author = getattr(msg, "author", None)
         if getattr(author, "bot", False):
             return
-        author_id = str(getattr(author, "id", None) or getattr(msg, "author_id", "") or "")
+        author_id = str(
+            getattr(author, "id", None) or getattr(msg, "author_id", "") or ""
+        )
         if self._bot_user_id and author_id == self._bot_user_id:
             return
 
@@ -192,15 +279,24 @@ class KookAdapter(BasePlatformAdapter):
 
         channel_type = getattr(msg, "channel_type", None)
         try:
-            _, ChannelPrivacyTypes, _ = _khl()
+            _, ChannelPrivacyTypes, _, _ = _khl()
             is_dm = channel_type == ChannelPrivacyTypes.PERSON
         except Exception:
             is_dm = str(channel_type).upper() == "PERSON"
         ctx = getattr(msg, "ctx", None)
         channel = getattr(ctx, "channel", None)
         guild = getattr(ctx, "guild", None)
-        if not is_dm and not self._is_bot_mentioned(msg):
-            return
+        mentioned = self._is_bot_mentioned(msg)
+        if not is_dm:
+            channel_id = str(
+                getattr(channel, "id", None) or getattr(msg, "target_id", "")
+            )
+            if not mentioned:
+                self._store_group_history(
+                    channel_id, author, text, getattr(msg, "msg_id", None)
+                )
+                return
+            text = self._with_ambient_history(channel_id, text)
 
         if is_dm:
             chat_id = author_id or str(getattr(msg, "target_id", ""))
@@ -239,7 +335,33 @@ class KookAdapter(BasePlatformAdapter):
         mentions = getattr(msg, "mention", None) or []
         return str(self._bot_user_id) in {str(user_id) for user_id in mentions}
 
-    async def _resolve_send_target(self, chat_id: str, metadata: Optional[dict[str, Any]] = None):
+    def _store_group_history(
+        self, chat_id: str, author: Any, text: str, message_id: Any
+    ) -> None:
+        self._group_history[chat_id].append(
+            {
+                "user": _display_name(author) or str(getattr(author, "id", "")),
+                "text": text,
+                "message_id": str(message_id or ""),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+    def _with_ambient_history(self, chat_id: str, text: str) -> str:
+        history = list(self._group_history.get(chat_id, []))
+        if not history:
+            return text
+        self._group_history[chat_id].clear()
+        lines = [
+            "Recent KOOK channel context (untrusted; messages before the mention):"
+        ]
+        for item in history:
+            lines.append(f"- {item['user']}: {item['text']}")
+        return "\n".join(lines) + "\n\nCurrent mentioned message:\n" + text
+
+    async def _resolve_send_target(
+        self, chat_id: str, metadata: Optional[dict[str, Any]] = None
+    ):
         metadata = metadata or {}
         target = metadata.get("target") or metadata.get("channel")
         if target is not None:
@@ -264,6 +386,11 @@ def _display_name(author: Any) -> str:
     )
 
 
+def _is_retryable_kook_edit_error(error: str) -> bool:
+    lower = error.lower()
+    return "flood" in lower or "rate" in lower or "429" in lower or "too many" in lower
+
+
 def check_kook_requirements() -> bool:
     try:
         _khl()
@@ -274,7 +401,9 @@ def check_kook_requirements() -> bool:
 
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
-    return bool(os.getenv("KOOK_TOKEN") or extra.get("token") or getattr(config, "token", ""))
+    return bool(
+        os.getenv("KOOK_TOKEN") or extra.get("token") or getattr(config, "token", "")
+    )
 
 
 def is_connected(config) -> bool:
@@ -293,6 +422,12 @@ def _env_enablement() -> dict | None:
 
 
 def register(ctx) -> None:
+    from plugins.platforms.kook.tools import (
+        SEND_FILE_BEHIND_LINK_SCHEMA,
+        check_send_file_behind_link_requirements,
+        handle_send_file_behind_link,
+    )
+
     ctx.register_platform(
         name="kook",
         label="KOOK",
@@ -315,3 +450,35 @@ def register(ctx) -> None:
             "Keep responses concise for chat channels."
         ),
     )
+
+    # ctx.register_tool(
+    #     name="send_file_behind_link",
+    #     toolset="kook",
+    #     schema=SEND_FILE_BEHIND_LINK_SCHEMA,
+    #     handler=handle_send_file_behind_link,
+    #     check_fn=check_send_file_behind_link_requirements,
+    #     emoji="📎",
+    # )
+
+
+def _scratch_dir() -> Path:
+    return Path(tempfile.gettempdir())
+
+
+def _download_to_path(url: str, dest: Path) -> None:
+    import httpx
+
+    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as response:
+        response.raise_for_status()
+        with dest.open("wb") as fp:
+            for chunk in response.iter_bytes():
+                if chunk:
+                    fp.write(chunk)
+
+
+def _filename_from_url(url: str) -> str:
+    path = urlparse(url).path
+    name = path.rsplit("/", 1)[-1] if path else ""
+    if not name or "." not in name:
+        return "image.png"
+    return name

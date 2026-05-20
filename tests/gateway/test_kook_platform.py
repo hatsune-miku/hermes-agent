@@ -118,22 +118,14 @@ def test_register_exposes_kook_platform_metadata():
     assert 'hermes-agent[kook]' in ctx.kwargs["install_hint"]
 
 
-def test_register_exposes_kook_raw_request_tool():
+def test_register_does_not_expose_kook_raw_request_tool():
     from plugins.platforms.kook import register
 
     ctx = _Context()
     register(ctx)
 
     tool_names = [tool["name"] for tool in ctx.tools]
-    assert "kook_raw_request" in tool_names
-    assert "send_file_behind_link" in tool_names
-    raw = next(t for t in ctx.tools if t["name"] == "kook_raw_request")
-    send_file = next(t for t in ctx.tools if t["name"] == "send_file_behind_link")
-    assert raw["toolset"] == "kook"
-    assert send_file["toolset"] == "kook"
-    assert callable(send_file["handler"])
-    assert callable(send_file["check_fn"])
-    assert send_file["schema"]["name"] == "send_file_behind_link"
+    assert "kook_raw_request" not in tool_names
 
 
 def test_env_enablement_reads_token_and_home_channel(monkeypatch):
@@ -517,6 +509,66 @@ def test_send_document_uploads_asset(monkeypatch):
         adapter._bot.client.create_asset.assert_awaited_once_with(Path("report.txt"))
         channel.send.assert_any_await("https://cdn.kook.example/file.txt", type=MessageTypes.FILE)
         channel.send.assert_any_await("report", type=MessageTypes.KMD)
+
+    asyncio.run(_run())
+
+
+def test_send_voice_uploads_asset_as_file(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import MessageTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        channel = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "voice-msg-1"}))
+        adapter._bot = SimpleNamespace(
+            client=SimpleNamespace(
+                fetch_public_channel=AsyncMock(return_value=channel),
+                create_asset=AsyncMock(return_value="https://cdn.kook.example/voice.ogg"),
+            )
+        )
+
+        result = await adapter.send_voice("channel-1", "voice.ogg")
+
+        assert result.success is True
+        assert result.message_id == "voice-msg-1"
+        adapter._bot.client.create_asset.assert_awaited_once_with(Path("voice.ogg"))
+        channel.send.assert_awaited_once_with(
+            "https://cdn.kook.example/voice.ogg", type=MessageTypes.FILE
+        )
+
+    asyncio.run(_run())
+
+
+def test_send_video_uploads_asset_as_file(monkeypatch):
+    _install_fake_khl(monkeypatch)
+    from khl import MessageTypes
+    from plugins.platforms.kook.adapter import KookAdapter
+
+    async def _run():
+        adapter = KookAdapter(_config(token="token-123"))
+        user_obj = SimpleNamespace(send=AsyncMock(return_value={"msg_id": "video-msg-1"}))
+        adapter._bot = SimpleNamespace(
+            client=SimpleNamespace(
+                fetch_user=AsyncMock(return_value=user_obj),
+                fetch_public_channel=AsyncMock(),
+                create_asset=AsyncMock(return_value="https://cdn.kook.example/clip.mp4"),
+            )
+        )
+
+        result = await adapter.send_video(
+            "user-9", "clip.mp4", caption="cap", metadata={"chat_type": "dm"}
+        )
+
+        assert result.success is True
+        assert result.message_id == "video-msg-1"
+        adapter._bot.client.create_asset.assert_awaited_once_with(Path("clip.mp4"))
+        adapter._bot.client.fetch_user.assert_awaited_once_with("user-9")
+        adapter._bot.client.fetch_public_channel.assert_not_called()
+        user_obj.send.assert_any_await(
+            "https://cdn.kook.example/clip.mp4", type=MessageTypes.FILE
+        )
+        user_obj.send.assert_any_await("cap", type=MessageTypes.KMD)
 
     asyncio.run(_run())
 

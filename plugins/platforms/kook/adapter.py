@@ -212,10 +212,65 @@ class KookAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
+        return await self._send_uploaded_asset(
+            chat_id=chat_id,
+            file_path=file_path,
+            caption=caption,
+            metadata=metadata,
+            kind="file",
+        )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_uploaded_asset(
+            chat_id=chat_id,
+            file_path=audio_path,
+            caption=caption,
+            metadata=metadata,
+            kind="audio",
+        )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_uploaded_asset(
+            chat_id=chat_id,
+            file_path=video_path,
+            caption=caption,
+            metadata=metadata,
+            kind="video",
+        )
+
+    async def _send_uploaded_asset(
+        self,
+        *,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        kind: str,
+    ) -> SendResult:
+        # KOOK's AUDIO/VIDEO message types require extra metadata (duration,
+        # cover image) the bot may not have, so we deliver every non-image
+        # asset as MessageTypes.FILE. The KOOK client still renders an inline
+        # preview/player based on the file extension.
         if not self._bot:
             return SendResult(success=False, error="KOOK bot is not connected")
         try:
-            target = await self._resolve_send_target(chat_id, kwargs.get("metadata"))
+            target = await self._resolve_send_target(chat_id, metadata)
             _, _, _, MessageTypes = _khl()
             asset_url = await self._bot.client.create_asset(Path(file_path))
             message = await target.send(asset_url, type=MessageTypes.FILE)
@@ -225,7 +280,9 @@ class KookAdapter(BasePlatformAdapter):
                 success=True, message_id=self._extract_message_id(message)
             )
         except Exception as exc:
-            logger.warning("KOOK: failed to send document to %s: %s", chat_id, exc)
+            logger.warning(
+                "KOOK: failed to send %s to %s: %s", kind, chat_id, exc
+            )
             return SendResult(success=False, error=str(exc))
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
@@ -423,11 +480,8 @@ def _env_enablement() -> dict | None:
 
 def register(ctx) -> None:
     from plugins.platforms.kook.tools import (
-        KOOK_RAW_REQUEST_SCHEMA,
         SEND_FILE_BEHIND_LINK_SCHEMA,
-        check_kook_raw_request_requirements,
         check_send_file_behind_link_requirements,
-        handle_kook_raw_request,
         handle_send_file_behind_link,
     )
 
@@ -450,18 +504,8 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are chatting via KOOK. KOOK supports KMarkdown and media messages. "
-            "Keep responses concise for chat channels. "
-            "Use the kook_raw_request tool to interact with the KOOK OpenAPI directly."
+            "Keep responses concise for chat channels."
         ),
-    )
-
-    ctx.register_tool(
-        name="kook_raw_request",
-        toolset="kook",
-        schema=KOOK_RAW_REQUEST_SCHEMA,
-        handler=handle_kook_raw_request,
-        check_fn=check_kook_raw_request_requirements,
-        emoji="🎮",
     )
 
     # ctx.register_tool(
