@@ -322,8 +322,8 @@ class KookAdapter(BasePlatformAdapter):
 
     async def _on_kook_message(self, msg) -> None:
         author = getattr(msg, "author", None)
-        if getattr(author, "bot", False):
-            return
+        # if getattr(author, "bot", False):
+        #     return
         author_id = str(
             getattr(author, "id", None) or getattr(msg, "author_id", "") or ""
         )
